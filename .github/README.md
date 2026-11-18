@@ -74,6 +74,13 @@ and treat values as optional, and their tests run upstream's real projection
 code, so an upstream format change fails `cargo test` after merging an upstream
 release.
 
+`graphql` sends a query of your own, with the session, request signing and token
+refresh handled as for commands. The backend rate-limits requests
+(`RATE_LIMITED`), so use it to fetch in one request what takes several
+commands, such as per-holding returns, which `broker quote` fetches one security
+at a time. Upstream doesn't maintain these queries, so an API change breaks them
+without a failing test.
+
 - Use an app-specific `config_dir` and `keyring_service` so the app and the
   `sc` CLI never overwrite each other's session.
 - Calls block. In async UIs, run them on a blocking thread; calling them

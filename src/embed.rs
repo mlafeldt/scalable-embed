@@ -206,6 +206,57 @@ impl Client {
         parse(self.run_command(command)?)
     }
 
+    /// Sends your own GraphQL query to the broker API and returns its `data`.
+    /// Adds `accountId` and `portfolioId` to `variables` (with `portfolio_id:
+    /// None`, the portfolio saved at login). Upstream doesn't maintain these
+    /// queries, so an API change breaks them without a failing test here.
+    pub fn graphql(
+        &mut self,
+        operation_name: &str,
+        query: &str,
+        portfolio_id: Option<&str>,
+        mut variables: serde_json::Map<String, Value>,
+    ) -> Result<Value> {
+        let dpop_options = crate::channel::current_dpop_runtime_options(&self.config);
+        let env = crate::resolve_active_env(&self.session_manager)?;
+        let env_cfg = crate::channel::current_env_config();
+        let loaded = crate::active_session::load_active_session(
+            &mut self.session_manager,
+            env,
+            &env_cfg,
+            &dpop_options,
+        )?;
+        let mut session = loaded.session;
+        let ids = crate::broker_shared::resolve_broker_ids(
+            &mut self.session_manager,
+            env,
+            &env_cfg,
+            &mut session,
+            &dpop_options,
+            portfolio_id,
+        )?;
+        variables.insert("accountId".into(), ids.account_id.into());
+        variables.insert("portfolioId".into(), ids.portfolio_id.into());
+        crate::session_refresh::execute_with_refresh_retry(
+            &mut self.session_manager,
+            env,
+            &env_cfg,
+            &mut session,
+            &dpop_options,
+            |token| {
+                crate::graphql::execute_graphql(
+                    &env_cfg.graphql_url,
+                    token,
+                    query,
+                    &variables,
+                    Some(operation_name),
+                    loaded.access_context,
+                    &dpop_options,
+                )
+            },
+        )
+    }
+
     fn run_command(&mut self, command: crate::cli::Commands) -> Result<Value> {
         let command = crate::normalize_command(command)?;
         crate::run_machine_command(command, &self.config, &mut self.session_manager)
