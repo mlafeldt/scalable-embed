@@ -1,0 +1,11 @@
+[package]
+name = "scalable-embed"
+version = "0.1.0"
+edition = "2024"
+description = "Unofficial Rust library for Scalable Capital, built on a fork of Scalable CLI"
+license = "Apache-2.0"
+repository = "https://github.com/mlafeldt/scalable-embed"
+publish = false
+
+[dependencies]
+scalable-cli = { path = ".." }
