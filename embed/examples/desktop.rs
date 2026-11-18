@@ -1,7 +1,7 @@
-//! Minimal desktop app: portfolio total, its change today, and the holdings
-//! ranked by today's return. Loads at startup and on Refresh (button or
-//! Cmd/Ctrl+R). Built with saudade, a small retained-mode GUI toolkit. Shares
-//! its files with the terminal example.
+//! Minimal desktop app: portfolio total, and its change and the holdings ranked
+//! by their return over a timeframe picked in the View menu. Loads at startup
+//! and on Refresh (button or Cmd/Ctrl+R), in one request. Built with saudade, a
+//! small retained-mode GUI toolkit. Shares its files with the terminal example.
 //!
 //!   cargo run --example desktop
 //!   cargo run --example desktop -- --file-session
@@ -29,14 +29,28 @@ use saudade::{
     MenuItem, Modal, Painter, PopupRequest, Rect, Size, Theme, Widget, WindowConfig,
 };
 use scalable_embed::{
-    Client, DeviceCodePrompt, LoginProgressSink, Options, SessionBackendPreference, Timeframe,
+    Client, DeviceCodePrompt, LoginProgressSink, Options, SessionBackendPreference,
 };
+use serde_json::Value;
 
 const WINDOW_W: i32 = 720;
 const WINDOW_H: i32 = 480;
 const MENU_H: i32 = 20;
 const LOGIN_W: i32 = 340;
 const LOGIN_H: i32 = 170;
+
+/// The timeframes in the View menu: API name, and menu and header label.
+const TIMEFRAMES: [(&str, &str); 6] = [
+    ("INTRADAY", "Today"),
+    ("ONE_WEEK", "Week"),
+    ("ONE_MONTH", "Month"),
+    ("YEAR_TO_DATE", "Year to date"),
+    ("ONE_YEAR", "Year"),
+    ("SINCE_BUY", "Since buy"),
+];
+
+/// One value per entry in `TIMEFRAMES`.
+type PerTimeframe = [Option<f64>; TIMEFRAMES.len()];
 
 fn main() {
     let file_session = std::env::args().any(|arg| arg == "--file-session");
@@ -81,19 +95,33 @@ fn main() {
         move |_: &mut EventCtx| state.borrow_mut().actions.push(action)
     };
 
-    let menu = MenuBar::new(Rect::new(0, 0, WINDOW_W, MENU_H)).add_menu(Menu::new(
-        "&Actions",
-        vec![
-            MenuItem::action("&Refresh", push(Action::Refresh))
-                .with_accel("Ctrl+R")
-                .with_enabled(can_refresh),
-            MenuItem::separator(),
-            MenuItem::action("&Log In", push(Action::LogIn)).with_enabled(can_log_in),
-            MenuItem::action("Log &Out", push(Action::LogOut)).with_enabled(can_log_out),
-            MenuItem::separator(),
-            MenuItem::action("&Quit", |cx| cx.close()),
-        ],
-    ));
+    let timeframes = TIMEFRAMES
+        .iter()
+        .enumerate()
+        .map(|(index, (_, label))| {
+            let (pick, check) = (state.clone(), state.clone());
+            MenuItem::action(*label, move |cx| {
+                pick.borrow_mut().timeframe = index;
+                cx.request_paint();
+            })
+            .with_checked(move || check.borrow().timeframe == index)
+        })
+        .collect();
+    let menu = MenuBar::new(Rect::new(0, 0, WINDOW_W, MENU_H))
+        .add_menu(Menu::new(
+            "&Actions",
+            vec![
+                MenuItem::action("&Refresh", push(Action::Refresh))
+                    .with_accel("Ctrl+R")
+                    .with_enabled(can_refresh),
+                MenuItem::separator(),
+                MenuItem::action("&Log In", push(Action::LogIn)).with_enabled(can_log_in),
+                MenuItem::action("Log &Out", push(Action::LogOut)).with_enabled(can_log_out),
+                MenuItem::separator(),
+                MenuItem::action("&Quit", |cx| cx.close()),
+            ],
+        ))
+        .add_menu(Menu::new("&View", timeframes));
 
     let ui = Column::new()
         .add_fixed(menu, MENU_H)
@@ -150,8 +178,8 @@ impl Reply {
 
 struct Snapshot {
     total: Option<f64>,
-    /// The portfolio's change today in €.
-    change: Option<f64>,
+    /// The portfolio's change in €.
+    changes: PerTimeframe,
     rows: Vec<Row>,
 }
 
@@ -159,8 +187,8 @@ struct Row {
     name: String,
     value: Option<f64>,
     price: Option<f64>,
-    /// Price performance today, as a fraction (0.05 is +5 %).
-    change: Option<f64>,
+    /// Price performance, as a fraction (0.05 is +5 %).
+    returns: PerTimeframe,
 }
 
 fn worker(
@@ -216,47 +244,107 @@ fn refresh(client: &mut Client) -> Reply {
     }
 }
 
-fn snapshot(client: &mut Client) -> Result<Snapshot> {
-    let overview = client.broker_overview(None, false)?.result;
-    let holdings = client.broker_holdings(None)?.result;
-
-    let change = overview
-        .performance
-        .iter()
-        .find(|r| r.timeframe == Timeframe::Intraday)
-        .and_then(|r| r.simple_absolute_return);
-    // Holdings carry no performance, so ask for each security's quote. A
-    // failed quote only blanks that row's return.
-    let rows = holdings
-        .items
-        .into_iter()
-        .map(|h| {
-            let change = h
-                .isin
-                .as_deref()
-                .and_then(|isin| client.broker_quote(None, isin, false).ok())
-                .and_then(|quote| {
-                    quote
-                        .result
-                        .quote_performances
-                        .into_iter()
-                        .find(|p| p.timeframe == Timeframe::Intraday)
-                })
-                .and_then(|p| p.performance);
-            Row {
-                name: h.name.or(h.isin).unwrap_or_default(),
-                value: h.valuation,
-                price: h.quote_mid_price,
-                change,
+/// Everything the window shows, in one request: upstream's overview and
+/// holdings queries trimmed to the fields used here, plus each security's
+/// performances, which upstream only fetches per security in `broker quote`.
+const SNAPSHOT_QUERY: &str = r#"
+query DesktopSnapshot($accountId: ID!, $portfolioId: ID!) {
+  account(id: $accountId) {
+    brokerPortfolio(id: $portfolioId) {
+      valuation(includeYearToDate: true) {
+        valuation
+        timeWeightedReturnByTimeframe {
+          timeframe
+          simpleAbsoluteReturn
+        }
+      }
+      inventory {
+        items {
+          isin
+          name
+          inventory {
+            position {
+              filled
+              fifoPrice
             }
+          }
+          portfolioIsinPerformance {
+            valuation
+          }
+          quoteTick(source: CONSOLIDATED, includeYearToDate: true) {
+            midPrice
+            performancesByTimeframe {
+              timeframe
+              performance
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"#;
+
+fn snapshot(client: &mut Client) -> Result<Snapshot> {
+    let data = client.graphql("DesktopSnapshot", SNAPSHOT_QUERY, None, Default::default())?;
+    let portfolio = &data["account"]["brokerPortfolio"];
+    let valuation = &portfolio["valuation"];
+    let items = portfolio["inventory"]["items"]
+        .as_array()
+        .context("unexpected DesktopSnapshot response")?;
+
+    let mut changes = per_timeframe(
+        &valuation["timeWeightedReturnByTimeframe"],
+        "simpleAbsoluteReturn",
+    );
+    // The overview has no since-buy figure, so add up each position's gain
+    // over its average buy price.
+    if let Some(since_buy) = TIMEFRAMES.iter().position(|(t, _)| *t == "SINCE_BUY") {
+        changes[since_buy] = items
+            .iter()
+            .map(|item| {
+                let position = &item["inventory"]["position"];
+                Some(
+                    decimal(&item["portfolioIsinPerformance"]["valuation"])?
+                        - decimal(&position["filled"])? * decimal(&position["fifoPrice"])?,
+                )
+            })
+            .sum();
+    }
+    let rows = items
+        .iter()
+        .map(|item| Row {
+            name: item["name"]
+                .as_str()
+                .or(item["isin"].as_str())
+                .unwrap_or_default()
+                .to_string(),
+            value: decimal(&item["portfolioIsinPerformance"]["valuation"]),
+            price: decimal(&item["quoteTick"]["midPrice"]),
+            returns: per_timeframe(&item["quoteTick"]["performancesByTimeframe"], "performance"),
         })
         .collect();
-
     Ok(Snapshot {
-        total: overview.valuation.total,
-        change,
+        total: decimal(&valuation["valuation"]),
+        changes,
         rows,
     })
+}
+
+/// Picks `field` from a list of `{timeframe, ...}` entries for each of
+/// `TIMEFRAMES`.
+fn per_timeframe(list: &Value, field: &str) -> PerTimeframe {
+    let list = list.as_array().map(Vec::as_slice).unwrap_or_default();
+    TIMEFRAMES.map(|(timeframe, _)| {
+        list.iter()
+            .find(|entry| entry["timeframe"] == timeframe)
+            .and_then(|entry| decimal(&entry[field]))
+    })
+}
+
+/// The API sends some decimals as strings.
+fn decimal(value: &Value) -> Option<f64> {
+    value.as_f64().or_else(|| value.as_str()?.parse().ok())
 }
 
 fn login(client: &mut Client, replies: &Sender<Reply>, cancel: &Arc<AtomicBool>) -> Result<()> {
@@ -332,6 +420,8 @@ struct State {
     /// Set while the login dialog is open.
     login: Option<LoginView>,
     logged_in: bool,
+    /// Index into `TIMEFRAMES`: whose returns the list shows and sorts by.
+    timeframe: usize,
     /// Set while the worker has requests to answer.
     busy: bool,
     /// Menu and button picks, handled once the event is dispatched.
@@ -615,11 +705,12 @@ impl Widget for Dashboard {
             size * 2.6,
             theme.text,
         );
-        let change = snapshot.and_then(|s| s.change);
+        let (timeframe, label) = (state.timeframe, TIMEFRAMES[state.timeframe].1);
+        let change = snapshot.and_then(|s| s.changes[timeframe]);
         let change_text = signed_eur(change);
         p.text(x, y, &change_text, size, gain_color(theme, change));
         let w = p.measure_text(&change_text, size).w;
-        p.text(x + w + 6, y, "Today", size, theme.disabled_text);
+        p.text(x + w + 6, y, label, size, theme.disabled_text);
         y += line;
 
         let button_w = p
@@ -660,14 +751,18 @@ impl Widget for Dashboard {
             return;
         };
 
-        let mut rows: Vec<&Row> = snapshot.rows.iter().collect();
-        rows.sort_by(|a, b| match (a.change, b.change) {
-            (Some(a), Some(b)) => b.total_cmp(&a),
+        let mut rows: Vec<(&Row, Option<f64>)> = snapshot
+            .rows
+            .iter()
+            .map(|row| (row, row.returns[timeframe]))
+            .collect();
+        rows.sort_by(|(_, a), (_, b)| match (a, b) {
+            (Some(a), Some(b)) => b.total_cmp(a),
             (a, b) => b.is_some().cmp(&a.is_some()),
         });
         let cells: Vec<[String; 2]> = rows
             .iter()
-            .map(|row| [eur(row.value), signed_pct(row.change.map(|c| c * 100.0))])
+            .map(|(row, ret)| [eur(row.value), signed_pct(ret.map(|r| r * 100.0))])
             .collect();
 
         let headers = ["Position", "Return", "Price"];
@@ -675,7 +770,7 @@ impl Widget for Dashboard {
             p.measure_text_styled(h, size, FontFamily::Sans, FontStyle::Bold)
                 .w
         });
-        for (row, texts) in rows.iter().zip(&cells) {
+        for ((row, _), texts) in rows.iter().zip(&cells) {
             widths[0] = widths[0].max(p.measure_text(&texts[0], size).w);
             widths[1] = widths[1].max(p.measure_text(&texts[1], size).w);
             widths[2] = widths[2].max(raised_cents_width(p, row.price, size));
@@ -708,7 +803,7 @@ impl Widget for Dashboard {
         let visible = ((inner.bottom() - y) / row_h).max(1) as usize;
         self.max_scroll = rows.len().saturating_sub(visible);
         let first = (self.scroll as usize).min(self.max_scroll);
-        for (row, texts) in rows.iter().zip(&cells).skip(first) {
+        for ((row, ret), texts) in rows.iter().zip(&cells).skip(first) {
             if y + row_h > inner.bottom() {
                 break;
             }
@@ -717,13 +812,7 @@ impl Widget for Dashboard {
             let w = p.measure_text(&texts[0], size).w;
             p.text(edges[0] - w, y, &texts[0], size, theme.text);
             let w = p.measure_text(&texts[1], size).w;
-            p.text(
-                edges[1] - w,
-                y,
-                &texts[1],
-                size,
-                gain_color(theme, row.change),
-            );
+            p.text(edges[1] - w, y, &texts[1], size, gain_color(theme, *ret));
             raised_cents(p, edges[2], y, row.price, size, theme.text);
             y += row_h;
         }
