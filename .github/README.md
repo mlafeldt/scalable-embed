@@ -44,13 +44,27 @@ println!("{:?}", overview.result.valuation.total);
 let txs = client.run(["broker", "transactions"])?;       // any sc command, raw JSON
 ```
 
-`embed/examples/terminal.rs` is a complete program:
+Two complete programs live in `embed/examples/`. Both share their session and
+files, and both take `--file-session` to keep the session in a file instead of
+the keychain.
+
+`terminal.rs` runs commands:
 
 ```bash
 cd embed
 cargo run --example terminal -- login
 cargo run --example terminal -- overview
 cargo run --example terminal -- logout
+```
+
+`desktop.rs` is a minimal desktop app built with
+[saudade](https://github.com/roblillack/saudade). It shows the portfolio total,
+its change today and the holdings ranked by today's return. It loads at startup
+and on Refresh (button or Cmd/Ctrl+R), and logs in from a dialog:
+
+```bash
+cd embed
+cargo run --example desktop
 ```
 
 Typed results (`src/embed/types.rs`) exist for `broker overview`, `broker
@@ -62,7 +76,12 @@ release.
 
 - Use an app-specific `config_dir` and `keyring_service` so the app and the
   `sc` CLI never overwrite each other's session.
-- Calls block; run them on a blocking thread in async UIs.
+- Calls block. In async UIs, run them on a blocking thread; calling them
+  directly inside an async runtime panics. The desktop example gives the client
+  its own thread and polls for replies.
+- On macOS, every rebuild of an unsigned binary asks again for access to the
+  session in the keychain. Pass `--file-session` to the examples while
+  developing to avoid that.
 - The library authenticates as the official CLI (same OAuth client and API
   endpoint). Scalable can change or restrict these at any time.
 
