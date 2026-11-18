@@ -73,6 +73,78 @@ pub enum Timeframe {
     Unknown,
 }
 
+/// `sc broker holdings`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Holdings {
+    pub requested_quote_source: Option<String>,
+    pub count: Option<u64>,
+    pub security_count: Option<u64>,
+    pub crypto_count: Option<u64>,
+    pub items: Vec<SecurityHolding>,
+    pub crypto_items: Vec<CryptoHolding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct SecurityHolding {
+    pub kind: String,
+    pub isin: Option<String>,
+    pub name: Option<String>,
+    pub security_type: Option<String>,
+    #[serde(default, deserialize_with = "number")]
+    pub quantity: Option<f64>,
+    #[serde(default, deserialize_with = "number")]
+    pub pending_quantity: Option<f64>,
+    #[serde(default, deserialize_with = "number")]
+    pub blocked_quantity: Option<f64>,
+    #[serde(default, deserialize_with = "number")]
+    pub fifo_price: Option<f64>,
+    #[serde(default, deserialize_with = "number")]
+    pub valuation: Option<f64>,
+    pub valuation_currency: Option<String>,
+    pub quote_venue: Option<String>,
+    #[serde(default, deserialize_with = "number")]
+    pub quote_mid_price: Option<f64>,
+    pub quote_currency: Option<String>,
+    pub quote_timestamp_utc: Option<String>,
+    pub quote_is_outdated: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct CryptoHolding {
+    pub kind: String,
+    pub ticker: Option<String>,
+    pub name: Option<String>,
+    pub position: CryptoPosition,
+    pub etp_positions: Vec<EtpPosition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct CryptoPosition {
+    #[serde(default, deserialize_with = "number")]
+    pub filled: Option<f64>,
+    #[serde(default, deserialize_with = "number")]
+    pub sellable: Option<f64>,
+    #[serde(default, deserialize_with = "number")]
+    pub pending: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct EtpPosition {
+    pub isin: Option<String>,
+    pub name: Option<String>,
+    pub position: Option<Position>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Position {
+    #[serde(default, deserialize_with = "number")]
+    pub blocked: Option<f64>,
+    #[serde(default, deserialize_with = "number")]
+    pub filled: Option<f64>,
+    #[serde(default, deserialize_with = "number")]
+    pub pending: Option<f64>,
+}
+
 /// Accepts JSON numbers and decimal strings.
 fn number<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<f64>, D::Error> {
     #[derive(Deserialize)]
@@ -93,16 +165,20 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
-    use crate::broker_projections::project_broker_overview_response;
+    use crate::broker_projections::{
+        project_broker_holdings_response, project_broker_overview_response,
+    };
     use crate::broker_queries::BrokerInput;
     use crate::broker_shared::{ResolvedBrokerIds, broker_result_envelope};
 
     /// Runs a GraphQL response through upstream's projection and envelope,
-    /// exactly as `sc broker overview --json` does.
-    fn overview_output(graphql_response: Value) -> Value {
+    /// exactly as `sc broker <command> --json` does.
+    fn output(
+        project: fn(&BrokerInput, &Value) -> anyhow::Result<Value>,
+        graphql_response: Value,
+    ) -> Value {
         let input = BrokerInput::new("acc-1", "port-1", true).expect("input");
-        let projected =
-            project_broker_overview_response(&input, &graphql_response).expect("projection");
+        let projected = project(&input, &graphql_response).expect("projection");
         let ids = ResolvedBrokerIds {
             account_id: "acc-1".to_string(),
             portfolio_id: "port-1".to_string(),
@@ -110,6 +186,14 @@ mod tests {
             portfolio_source: "explicit",
         };
         broker_result_envelope(&ids, projected)
+    }
+
+    fn overview_output(graphql_response: Value) -> Value {
+        output(project_broker_overview_response, graphql_response)
+    }
+
+    fn holdings_output(graphql_response: Value) -> Value {
+        output(project_broker_holdings_response, graphql_response)
     }
 
     #[test]
@@ -175,5 +259,109 @@ mod tests {
         assert_eq!(overview.timestamps.valuation_timestamp_utc, None);
         assert_eq!(overview.performance[0].timeframe, Timeframe::Unknown);
         assert_eq!(overview.performance[0].simple_absolute_return, None);
+    }
+
+    #[test]
+    fn holdings_types_match_upstream_projection() {
+        let output = holdings_output(json!({"account": {"brokerPortfolio": {
+            "inventory": {"items": [{
+                "isin": "IE00B4L5Y983",
+                "name": "iShares Core MSCI World",
+                "type": "ETF",
+                "inventory": {"position": {
+                    "filled": 12.5, "pending": 0, "blocked": "0", "fifoPrice": "80.10"
+                }},
+                "portfolioIsinPerformance": {"valuation": 1234.56, "currency": "EUR"},
+                "quoteTick": {
+                    "venue": "MUNC",
+                    "midPrice": 98.76,
+                    "currency": "EUR",
+                    "timestampUtc": {"time": "2026-03-04T10:15:30Z"},
+                    "isOutdated": false
+                }
+            }]},
+            "crypto": {"coins": [{
+                "ticker": "BTC",
+                "name": "Bitcoin",
+                "position": {"filled": 0.25, "sellable": 0.2, "pending": 0.05},
+                "inventory": [
+                    {"isin": "DE000A3GPMN9", "etpSecurity": {"name": "Bitcoin ETP", "inventory": null}},
+                    {"isin": "CH0454664001", "etpSecurity": {"name": "Bitcoin ETP A", "inventory": {
+                        "position": {"blocked": 0, "filled": 1.5, "pending": 0.25}
+                    }}}
+                ]
+            }]}
+        }}}));
+
+        let parsed: BrokerResult<Holdings> = serde_json::from_value(output).expect("typed");
+
+        assert_eq!(
+            parsed.result,
+            Holdings {
+                requested_quote_source: Some("CONSOLIDATED".to_string()),
+                count: Some(1),
+                security_count: Some(1),
+                crypto_count: Some(1),
+                items: vec![SecurityHolding {
+                    kind: "security".to_string(),
+                    isin: Some("IE00B4L5Y983".to_string()),
+                    name: Some("iShares Core MSCI World".to_string()),
+                    security_type: Some("ETF".to_string()),
+                    quantity: Some(12.5),
+                    pending_quantity: Some(0.0),
+                    blocked_quantity: Some(0.0),
+                    fifo_price: Some(80.10),
+                    valuation: Some(1234.56),
+                    valuation_currency: Some("EUR".to_string()),
+                    quote_venue: Some("MUNC".to_string()),
+                    quote_mid_price: Some(98.76),
+                    quote_currency: Some("EUR".to_string()),
+                    quote_timestamp_utc: Some("2026-03-04T10:15:30Z".to_string()),
+                    quote_is_outdated: Some(false),
+                }],
+                crypto_items: vec![CryptoHolding {
+                    kind: "crypto".to_string(),
+                    ticker: Some("BTC".to_string()),
+                    name: Some("Bitcoin".to_string()),
+                    position: CryptoPosition {
+                        filled: Some(0.25),
+                        sellable: Some(0.2),
+                        pending: Some(0.05),
+                    },
+                    etp_positions: vec![
+                        EtpPosition {
+                            isin: Some("CH0454664001".to_string()),
+                            name: Some("Bitcoin ETP A".to_string()),
+                            position: Some(Position {
+                                blocked: Some(0.0),
+                                filled: Some(1.5),
+                                pending: Some(0.25),
+                            }),
+                        },
+                        EtpPosition {
+                            isin: Some("DE000A3GPMN9".to_string()),
+                            name: Some("Bitcoin ETP".to_string()),
+                            position: None,
+                        },
+                    ],
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn holdings_tolerate_missing_values() {
+        let output = holdings_output(json!({"account": {"brokerPortfolio": {
+            "inventory": {"items": [{"isin": "A", "inventory": {}, "quoteTick": {}}]}
+        }}}));
+
+        let parsed: BrokerResult<Holdings> = serde_json::from_value(output).expect("typed");
+
+        let holding = &parsed.result.items[0];
+        assert_eq!(holding.name, None);
+        assert_eq!(holding.quantity, None);
+        assert_eq!(holding.valuation, None);
+        assert_eq!(holding.quote_timestamp_utc, None);
+        assert!(parsed.result.crypto_items.is_empty());
     }
 }

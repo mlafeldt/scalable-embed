@@ -41,7 +41,7 @@ if !client.is_logged_in()? {
 }
 let overview = client.broker_overview(None, false)?;     // typed
 println!("{:?}", overview.result.valuation.total);
-let holdings = client.run(["broker", "holdings"])?;      // any sc command, raw JSON
+let txs = client.run(["broker", "transactions"])?;       // any sc command, raw JSON
 ```
 
 `embed/examples/terminal.rs` is a complete program:
@@ -53,11 +53,12 @@ cargo run --example terminal -- overview
 cargo run --example terminal -- logout
 ```
 
-Typed results (`src/embed/types.rs`) exist for `broker overview` so far; every
-other command is available through `run` (raw JSON) or `run_as::<T>` with your
-own serde type. The typed structs ignore unknown fields and treat values as
-optional, and their tests run upstream's real projection code, so an upstream
-format change fails `cargo test` after merging an upstream release.
+Typed results (`src/embed/types.rs`) exist for `broker overview` and `broker
+holdings` so far; every other command is available through `run` (raw JSON) or
+`run_as::<T>` with your own serde type. The typed structs ignore unknown fields
+and treat values as optional, and their tests run upstream's real projection
+code, so an upstream format change fails `cargo test` after merging an upstream
+release.
 
 - Use an app-specific `config_dir` and `keyring_service` so the app and the
   `sc` CLI never overwrite each other's session.

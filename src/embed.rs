@@ -167,6 +167,24 @@ impl Client {
         parse(self.run_command(command)?)
     }
 
+    /// `sc broker holdings`. With `portfolio_id: None`, uses the portfolio
+    /// saved at login.
+    pub fn broker_holdings(
+        &mut self,
+        portfolio_id: Option<&str>,
+    ) -> Result<BrokerResult<Holdings>> {
+        use crate::cli::{BrokerArgs, BrokerCommand, BrokerHoldingsArgs, Commands};
+        let command = Commands::Broker(BrokerArgs {
+            command: BrokerCommand::Holdings(BrokerHoldingsArgs {
+                portfolio_id: portfolio_id.map(str::to_string),
+                include_year_to_date: false,
+                quote_source: None,
+                json: true,
+            }),
+        });
+        parse(self.run_command(command)?)
+    }
+
     fn run_command(&mut self, command: crate::cli::Commands) -> Result<Value> {
         let command = crate::normalize_command(command)?;
         crate::run_machine_command(command, &self.config, &mut self.session_manager)
