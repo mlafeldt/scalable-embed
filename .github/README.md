@@ -5,10 +5,15 @@ desktop app. It is a fork of [Scalable CLI](https://github.com/ScalableCapital/s
 and is not affiliated with or supported by Scalable Capital. For the official
 CLI, use the upstream releases.
 
-The fork adds an embedding API that runs CLI commands in-process. Commands
-return the same JSON `data` that `sc <command> --json` prints and keep the
-CLI's behavior, including the two-step trade and savings-plan confirmation
-flows.
+The fork adds an embedding API with the CLI's login and session handling and
+two ways to use them:
+
+- **Read** with GraphQL queries of your own (`query`), fetching what a screen
+  needs in one request.
+- **Trade and make other changes** with CLI commands run in-process (`run`).
+  They return the same JSON `data` that `sc <command> --json` prints and keep
+  the CLI's behavior, including the two-step trade and savings-plan
+  confirmation flows.
 
 ![The terminal example showing a portfolio's total, today's change and its holdings ranked by today's return](screenshots/terminal.png)
 
@@ -24,6 +29,7 @@ scalable-embed = { git = "https://github.com/mlafeldt/scalable-embed" }
 ```rust
 use std::sync::atomic::AtomicBool;
 use scalable_embed::{Client, LoginEvent, Options};
+use serde_json::json;
 
 let mut client = Client::new(Options::new(app_config_dir, "com.example.myapp"))?;
 if !client.is_logged_in()? {
@@ -34,9 +40,25 @@ if !client.is_logged_in()? {
         }
     })?;
 }
-let overview = client.broker_overview(None, false)?;     // typed
-println!("{:?}", overview.result.valuation.total);
-let txs = client.run(["broker", "transactions"])?;       // any sc command, raw JSON
+
+// Read: a query of your own.
+let ids = client.broker_ids(None)?;
+let data = client.query(
+    "Total",
+    "query Total($accountId: ID!, $portfolioId: ID!) {
+       account(id: $accountId) {
+         brokerPortfolio(id: $portfolioId) {
+           valuation(includeYearToDate: false) { valuation }
+         }
+       }
+     }",
+    json!({"accountId": ids.account_id, "portfolioId": ids.portfolio_id}),
+)?;
+
+// Change: any sc command. This one only previews the order; repeating it
+// with --confirm and the ID from the preview submits it.
+let buy = ["broker", "trade", "buy", "--isin", "IE00B4L5Y983", "--amount", "100"];
+let preview = client.run(buy)?;
 ```
 
 A complete program lives in `embed/examples/terminal/`: a minimal terminal app
@@ -52,22 +74,40 @@ cargo run --example terminal
 
 Pass `--file-session` to keep the session in a file instead of the keychain.
 
-Typed results (`src/embed/types.rs`) exist for `broker overview`, `broker
-holdings` and `broker quote` so far; every other command is available through
-`run` (raw JSON) or `run_as::<T>` with your own serde type. The typed structs
-ignore unknown fields and treat values as optional, and their tests run
-upstream's real projection code, so an upstream format change fails `cargo test`
-after merging an upstream release.
-
 `query` sends a GraphQL query of your own, with the session, request signing and
-token refresh handled as for commands; `broker_ids` gives the account and
-portfolio IDs most queries need, and `query_as::<T>` deserializes the result.
-The backend rate-limits requests (`RATE_LIMITED`), so use it to fetch in one
-request what takes several commands, such as per-holding returns, which `broker
-quote` fetches one security at a time. It rejects mutations, so trades and other
-changes keep going through commands, with their confirmation flows and trade
-controls. Upstream doesn't maintain these queries, so an API change breaks them
+token refresh handled as for commands. `broker_ids` gives the account and
+portfolio IDs most queries need, `query_as::<T>` deserializes the result into
+your own serde type, and `decimal` and `Timeframe` help write that type. The
+backend rate-limits requests (`RATE_LIMITED`), so fetch in one query what takes
+several commands, such as per-holding returns, which `broker quote` fetches one
+security at a time. Upstream's queries in `src/broker_queries.rs` show what the
+API offers. Upstream doesn't maintain your queries, so an API change breaks them
 without a failing test.
+
+`run` runs any `sc` command except `login` and returns its raw JSON;
+`run_as::<T>` deserializes it into your own serde type. Commands can read too,
+but each is a request of its own, and upstream may change their JSON.
+
+### Why reads and changes take different paths
+
+The API would accept both as GraphQL. The library splits them because a mistake
+costs differently on each side:
+
+- **A wrong query shows a wrong number.** So reads are free-form. Upstream's
+  read commands are shaped for the CLI's output: a screen that combines several
+  of them needs several requests and soon hits the rate limit, where one query
+  fetches exactly its fields.
+- **A wrong mutation places a wrong order.** In the CLI an order is not one
+  call but a preview with its checks and disclosures, a confirmation ID that
+  expires, and only then the submit, within the trade controls you configure
+  (allowed and denied ISINs, a maximum order amount). A mutation of your own
+  would skip all of that, and you could only test it by placing orders. So
+  `query` rejects mutations, and commands are the only way to change the
+  account.
+
+Upstream maintains the commands' order flow, so merging a release brings its
+changes along. Nobody maintains your queries but you, which is acceptable for
+reading and not for trading.
 
 Errors carry the code `sc --json` reports, such as `no_session`, `rate_limited`
 or `network_error`, so apps can match on `err.code()`; `err.needs_login()` tells
@@ -120,8 +160,11 @@ of upstream's `README.md`. Changes to upstream files are limited to these hooks:
 | `src/session.rs` | keyring service honors the embedder's override |
 
 Keep it that way: change upstream files only in these hooks, add no
-dependencies (keeps `Cargo.lock` conflict-free), and don't reformat upstream
-code.
+dependencies to the root package, and don't reformat upstream code. Upstream
+changes the root `Cargo.lock` with every release, so a dependency added there
+conflicts on each sync. The `embed/` crate has a `Cargo.lock` of its own and can
+depend on anything, so code that doesn't need upstream's internals belongs
+there.
 
 ## Syncing with upstream
 

@@ -1,7 +1,15 @@
 //! Embedding API (fork addition, not upstream): drive Scalable in-process from
-//! another application, such as a desktop UI. Commands return the same JSON
-//! `data` that `sc <command> --json` prints, and keep the CLI's semantics,
-//! including the two-step trade and savings-plan confirmation flows.
+//! another application, such as a terminal or desktop UI. Read with GraphQL
+//! queries of your own (`Client::query`); trade and make other changes with
+//! `sc` commands (`Client::run`), which return the same JSON `data` that
+//! `sc <command> --json` prints and keep the CLI's semantics, including the
+//! two-step trade and savings-plan confirmation flows.
+//!
+//! The split follows what a mistake costs. A wrong query shows a wrong number,
+//! so reads are free-form and fetch what a screen needs in one request, where
+//! several commands would hit the rate limit. A wrong mutation places a wrong
+//! order, so changes only go through upstream's commands, with their previews,
+//! confirmations and trade controls, and `query` rejects mutations.
 //!
 //! All calls block. In async UIs, run them on a blocking thread
 //! (e.g. `tokio::task::spawn_blocking`) and guard the `Client` with a mutex.
@@ -164,7 +172,9 @@ impl Client {
     }
 
     /// Runs any `sc` command except `login`, given its arguments without the
-    /// leading `sc`, e.g. `["broker", "quote", "--isin", "IE00B4L5Y983"]`.
+    /// leading `sc`, e.g. `["broker", "quote", "--isin", "IE00B4L5Y983"]`, and
+    /// returns the `data` that `sc <command> --json` prints. The way to trade
+    /// and make other changes; for reading, `query` fetches more per request.
     pub fn run<I, T>(&mut self, args: I) -> Result<Value>
     where
         I: IntoIterator<Item = T>,
@@ -172,11 +182,15 @@ impl Client {
     {
         let argv = std::iter::once(OsString::from("sc")).chain(args.into_iter().map(Into::into));
         let crate::cli::Cli { command } = crate::cli::Cli::try_parse_from(argv)?;
-        self.run_command(command)
+        let command = crate::normalize_command(command)?;
+        Ok(crate::run_machine_command(
+            command,
+            &self.config,
+            &mut self.session_manager,
+        )?)
     }
 
-    /// Like `run`, but deserializes the result into your own type, for
-    /// commands that have no typed method here yet.
+    /// Like `run`, but deserializes the result into your own type.
     pub fn run_as<R, I, T>(&mut self, args: I) -> Result<R>
     where
         R: DeserializeOwned,
@@ -184,58 +198,6 @@ impl Client {
         T: Into<OsString> + Clone,
     {
         parse(self.run(args)?)
-    }
-
-    /// `sc broker overview`. With `portfolio_id: None`, uses the portfolio
-    /// saved at login.
-    pub fn broker_overview(
-        &mut self,
-        portfolio_id: Option<&str>,
-        include_year_to_date: bool,
-    ) -> Result<BrokerResult<Overview>> {
-        self.broker(crate::cli::BrokerCommand::Overview(
-            crate::cli::BrokerOverviewArgs {
-                portfolio_id: portfolio_id.map(str::to_string),
-                include_year_to_date,
-                json: true,
-            },
-        ))
-    }
-
-    /// `sc broker holdings`. With `portfolio_id: None`, uses the portfolio
-    /// saved at login.
-    pub fn broker_holdings(
-        &mut self,
-        portfolio_id: Option<&str>,
-    ) -> Result<BrokerResult<Holdings>> {
-        self.broker(crate::cli::BrokerCommand::Holdings(
-            crate::cli::BrokerHoldingsArgs {
-                portfolio_id: portfolio_id.map(str::to_string),
-                // Only affects quote performances, which holdings don't show.
-                include_year_to_date: false,
-                quote_source: None,
-                json: true,
-            },
-        ))
-    }
-
-    /// `sc broker quote`. With `portfolio_id: None`, uses the portfolio saved
-    /// at login. `include_year_to_date` adds the `YEAR_TO_DATE` performance.
-    pub fn broker_quote(
-        &mut self,
-        portfolio_id: Option<&str>,
-        isin: &str,
-        include_year_to_date: bool,
-    ) -> Result<BrokerResult<Quote>> {
-        self.broker(crate::cli::BrokerCommand::Quote(
-            crate::cli::BrokerQuoteArgs {
-                portfolio_id: portfolio_id.map(str::to_string),
-                isin: isin.to_string(),
-                include_year_to_date,
-                quote_source: None,
-                json: true,
-            },
-        ))
     }
 
     /// The account and portfolio IDs broker commands use, for the variables
@@ -331,20 +293,6 @@ impl Client {
             session: loaded.session,
             access_context: loaded.access_context,
         })
-    }
-
-    fn broker<R: DeserializeOwned>(&mut self, command: crate::cli::BrokerCommand) -> Result<R> {
-        let command = crate::cli::Commands::Broker(crate::cli::BrokerArgs { command });
-        parse(self.run_command(command)?)
-    }
-
-    fn run_command(&mut self, command: crate::cli::Commands) -> Result<Value> {
-        let command = crate::normalize_command(command)?;
-        Ok(crate::run_machine_command(
-            command,
-            &self.config,
-            &mut self.session_manager,
-        )?)
     }
 }
 
