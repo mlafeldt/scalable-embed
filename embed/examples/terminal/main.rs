@@ -13,7 +13,9 @@
 //! main thread sends it requests and, while any are outstanding, checks for
 //! replies between short waits for keys.
 
+mod model;
 mod numbers;
+mod portfolio;
 mod worker;
 
 use std::io;
@@ -31,8 +33,9 @@ use ratatui::widgets::{Block, Cell, Clear, Padding, Paragraph, Row, Table, Tabs}
 use ratatui::{DefaultTerminal, Frame};
 use scalable_embed::{DeviceCodePrompt, LoginEvent};
 
+use model::{Snapshot, TIMEFRAMES};
 use numbers::{eur, number, signed_eur, signed_pct};
-use worker::{Reply, Request, Snapshot, TIMEFRAMES};
+use worker::{Reply, Request};
 
 /// How long to wait for a key before checking for replies again.
 const TICK: Duration = Duration::from_millis(50);
@@ -484,10 +487,10 @@ mod tests {
 
     use super::*;
 
-    fn row(name: &str, value: f64, price: f64, today: Option<f64>) -> worker::Row {
+    fn row(name: &str, value: f64, price: f64, today: Option<f64>) -> model::Row {
         let mut returns = [None; TIMEFRAMES.len()];
         returns[0] = today;
-        worker::Row {
+        model::Row {
             name: name.to_string(),
             value: Some(value),
             price: Some(price),
