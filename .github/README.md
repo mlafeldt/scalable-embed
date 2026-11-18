@@ -114,7 +114,8 @@ or `network_error`, so apps can match on `err.code()`; `err.needs_login()` tells
 when only a new login helps.
 
 - Use an app-specific `config_dir` and `keyring_service` so the app and the
-  `sc` CLI never overwrite each other's session.
+  `sc` CLI never overwrite each other's session or signing key. The service
+  also namespaces the Secure Enclave key when that backend is selected.
 - Calls block. In async UIs, run them on a blocking thread; calling them
   directly inside an async runtime panics. The example gives the client its
   own thread and polls for replies.
@@ -158,6 +159,7 @@ of upstream's `README.md`. Changes to upstream files are limited to these hooks:
 | `src/auth.rs` | device-code login split with a prompt callback; response fields and progress sink crate-visible for the embedding adapter |
 | `src/config.rs` | config dir honors the embedder's override |
 | `src/session.rs` | keyring service honors the embedder's override |
+| `src/dpop/secure_enclave.rs` | two label overrides; namespace construction lives in `embed` |
 
 Keep it that way: change upstream files only in these hooks, add no
 dependencies to the root package, and don't reformat upstream code. Upstream

@@ -42,7 +42,9 @@ impl SecureEnclaveKey {
         search
             .class(ItemClass::key())
             .key_class(KeyClass::private())
-            .label(DPOP_SECURE_ENCLAVE_LABEL)
+            .label(
+                crate::embed::secure_enclave_label_override().unwrap_or(DPOP_SECURE_ENCLAVE_LABEL),
+            )
             .load_refs(true)
             .limit(1);
         search.ignore_legacy_keychains();
@@ -75,7 +77,9 @@ impl SecureEnclaveKey {
         options
             .set_key_type(KeyType::ec_sec_prime_random())
             .set_size_in_bits(256)
-            .set_label(DPOP_SECURE_ENCLAVE_LABEL)
+            .set_label(
+                crate::embed::secure_enclave_label_override().unwrap_or(DPOP_SECURE_ENCLAVE_LABEL),
+            )
             .set_token(Token::SecureEnclave)
             .set_location(Location::DataProtectionKeychain)
             .set_access_control(access_control);

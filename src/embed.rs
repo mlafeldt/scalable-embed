@@ -43,16 +43,40 @@ use crate::dpop::DpopRuntimeOptions;
 use crate::session::{Session, SessionManager};
 
 /// Config dir and keyring service, set by the first `Client::new`.
-static STORAGE: OnceLock<(PathBuf, String)> = OnceLock::new();
+static STORAGE: OnceLock<Storage> = OnceLock::new();
 
-pub(crate) fn config_dir_override() -> Option<&'static Path> {
-    STORAGE.get().map(|(dir, _)| dir.as_path())
+#[derive(PartialEq, Eq)]
+struct Storage {
+    config_dir: PathBuf,
+    keyring_service: String,
+    secure_enclave_label: String,
 }
 
-pub(crate) fn keyring_service_or(default: &'static str) -> &'static str {
+impl Storage {
+    fn new(config_dir: PathBuf, keyring_service: String) -> Self {
+        let secure_enclave_label = format!("{keyring_service}:auth-signing-key:v2");
+        Self {
+            config_dir,
+            keyring_service,
+            secure_enclave_label,
+        }
+    }
+}
+
+pub(crate) fn config_dir_override() -> Option<&'static Path> {
+    STORAGE.get().map(|storage| storage.config_dir.as_path())
+}
+
+pub(crate) fn keyring_service_override() -> Option<&'static str> {
     STORAGE
         .get()
-        .map_or(default, |(_, service)| service.as_str())
+        .map(|storage| storage.keyring_service.as_str())
+}
+
+pub(crate) fn secure_enclave_label_override() -> Option<&'static str> {
+    STORAGE
+        .get()
+        .map(|storage| storage.secure_enclave_label.as_str())
 }
 
 pub struct Options {
@@ -60,7 +84,8 @@ pub struct Options {
     /// confirmation stores. Use an app-specific directory so the app and the
     /// `sc` CLI never overwrite each other's state.
     pub config_dir: PathBuf,
-    /// Keychain service name for the session secret (keyring backend only).
+    /// Keychain service name for the session secret and namespace for the
+    /// Secure Enclave signing key, when those backends are selected.
     pub keyring_service: String,
     pub config: AppConfig,
 }
@@ -95,7 +120,7 @@ impl Client {
     /// it fails, and later calls must pass the same `config_dir` and
     /// `keyring_service`.
     pub fn new(options: Options) -> Result<Self> {
-        let storage = (options.config_dir, options.keyring_service);
+        let storage = Storage::new(options.config_dir, options.keyring_service);
         if let Err(storage) = STORAGE.set(storage)
             && STORAGE.get() != Some(&storage)
         {
@@ -413,6 +438,21 @@ fn parse<R: DeserializeOwned>(data: Value) -> Result<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn secure_enclave_label_is_scoped_to_the_app_service() {
+        let app = Storage::new(PathBuf::from("app"), "test.scalable-embed".to_string());
+        let other = Storage::new(PathBuf::from("other"), "test.other-app".to_string());
+        assert_eq!(
+            app.secure_enclave_label,
+            "test.scalable-embed:auth-signing-key:v2"
+        );
+        assert_ne!(app.secure_enclave_label, other.secure_enclave_label);
+        assert_ne!(
+            app.secure_enclave_label,
+            "scalable.capital:scalable-cli:auth-signing-key:v2"
+        );
+    }
 
     #[test]
     fn login_events_deliver_the_prompt_and_second_factor_once() {
