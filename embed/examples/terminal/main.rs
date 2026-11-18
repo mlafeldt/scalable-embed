@@ -25,13 +25,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
 
+use anyhow::Context;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Clear, Padding, Paragraph, Row, Table, Tabs};
 use ratatui::{DefaultTerminal, Frame};
-use scalable_embed::{DeviceCodePrompt, LoginEvent};
+use scalable_embed::{Client, DeviceCodePrompt, LoginEvent, Options, SessionBackendPreference};
 
 use model::{Snapshot, TIMEFRAMES};
 use numbers::{eur, number, signed_eur, signed_pct};
@@ -43,10 +44,19 @@ const COLUMN_GAP: u16 = 3;
 const LOGIN_W: u16 = 46;
 const LOGIN_H: u16 = 9;
 
-fn main() -> io::Result<()> {
+fn main() -> anyhow::Result<()> {
     let file_session = std::env::args().any(|arg| arg == "--file-session");
-    let (requests, replies) = worker::spawn(file_session);
-    ratatui::run(|terminal| App::new(requests, replies).run(terminal))
+    // With files and a keychain entry of its own, apart from the `sc` CLI's.
+    let home = std::env::var_os("HOME").context("HOME is not set")?;
+    let config_dir = std::path::Path::new(&home).join(".config/scalable-embed-example");
+    let mut options = Options::new(config_dir, "dev.example.scalable-embed");
+    if file_session {
+        options.config.auth.session_backend = SessionBackendPreference::File;
+    }
+    let client = Client::new(options)?;
+    let (requests, replies) = worker::spawn(client);
+    ratatui::run(|terminal| App::new(requests, replies).run(terminal))?;
+    Ok(())
 }
 
 struct App {
@@ -60,7 +70,6 @@ struct App {
     pending: usize,
     /// First visible holdings row.
     scroll: usize,
-    last_login: u64,
     quit: bool,
 }
 
@@ -73,8 +82,6 @@ enum Session {
 }
 
 struct LoginView {
-    /// Tells this login's replies from those of logins cancelled before.
-    id: u64,
     cancel: Arc<AtomicBool>,
     prompt: Option<DeviceCodePrompt>,
     status: &'static str,
@@ -102,7 +109,6 @@ impl App {
             timeframe: 0,
             pending: 0,
             scroll: 0,
-            last_login: 0,
             quit: false,
         }
     }
@@ -120,9 +126,6 @@ impl App {
                 self.on_key(key);
             }
             while let Ok(reply) = self.replies.try_recv() {
-                if reply.is_final() {
-                    self.pending = self.pending.saturating_sub(1);
-                }
                 self.handle(reply);
             }
         }
@@ -161,8 +164,10 @@ impl App {
         match key.code {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('r') => self.refresh(),
-            KeyCode::Char('l') if matches!(self.session, Session::LoggedOut) => self.start_login(),
-            KeyCode::Char('o') if matches!(self.session, Session::LoggedIn(_)) => {
+            KeyCode::Char('l') if !self.busy() && matches!(self.session, Session::LoggedOut) => {
+                self.start_login();
+            }
+            KeyCode::Char('o') if !self.busy() && matches!(self.session, Session::LoggedIn(_)) => {
                 self.send(Request::Logout);
             }
             KeyCode::Tab => self.timeframe = (self.timeframe + 1) % TIMEFRAMES.len(),
@@ -184,6 +189,9 @@ impl App {
     }
 
     fn handle(&mut self, reply: Reply) {
+        if reply.is_final() {
+            self.pending = self.pending.saturating_sub(1);
+        }
         match reply {
             Reply::Data(snapshot) => {
                 self.session = Session::LoggedIn(Some(snapshot));
@@ -194,16 +202,14 @@ impl App {
             }
             Reply::Error(err) => self.status = format!("Error: {err}"),
             Reply::NeedsLogin => self.start_login(),
-            Reply::Login { id, event } => {
-                if let Session::LoggingIn(login) = &mut self.session
-                    && login.id == id
-                {
+            Reply::Login(event) => {
+                if let Session::LoggingIn(login) = &mut self.session {
                     login.update(event);
                 }
             }
-            Reply::LoginDone { id, result } => {
+            Reply::LoginDone(result) => {
                 // A cancelled login's dialog is gone already.
-                if !matches!(&self.session, Session::LoggingIn(login) if login.id == id) {
+                if !matches!(self.session, Session::LoggingIn(_)) {
                     return;
                 }
                 match result {
@@ -226,22 +232,17 @@ impl App {
     }
 
     fn start_login(&mut self) {
-        if matches!(self.session, Session::LoggingIn(_)) {
+        if self.busy() || matches!(self.session, Session::LoggingIn(_)) {
             return;
         }
-        self.last_login += 1;
         let cancel = Arc::new(AtomicBool::new(false));
         self.session = Session::LoggingIn(LoginView {
-            id: self.last_login,
             cancel: cancel.clone(),
             prompt: None,
             status: "Requesting a login code...",
         });
         self.status = "Logging in...".to_string();
-        self.send(Request::Login {
-            id: self.last_login,
-            cancel,
-        });
+        self.send(Request::Login(cancel));
     }
 
     fn send(&mut self, request: Request) {
@@ -332,8 +333,16 @@ impl App {
     fn key_hints(&self) -> Line<'_> {
         let hints = [
             ("r", "Refresh", !self.busy()),
-            ("l", "Log In", matches!(self.session, Session::LoggedOut)),
-            ("o", "Log Out", matches!(self.session, Session::LoggedIn(_))),
+            (
+                "l",
+                "Log In",
+                !self.busy() && matches!(self.session, Session::LoggedOut),
+            ),
+            (
+                "o",
+                "Log Out",
+                !self.busy() && matches!(self.session, Session::LoggedIn(_)),
+            ),
             ("Tab", "Timeframe", true),
             ("q", "Quit", true),
         ];
@@ -496,6 +505,76 @@ mod tests {
             price: Some(price),
             returns,
         }
+    }
+
+    #[test]
+    fn cancelled_login_finishes_before_another_can_start() {
+        let (requests, worker_requests) = mpsc::channel();
+        let (_, replies) = mpsc::channel();
+        let mut app = App::new(requests, replies);
+        app.session = Session::LoggedOut;
+        let login_key = KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE);
+
+        app.on_key(login_key);
+        let Request::Login(cancel) = worker_requests.try_recv().expect("login request") else {
+            panic!("login request");
+        };
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(cancel.load(Ordering::Relaxed));
+        assert!(app.busy());
+
+        app.on_key(login_key);
+        assert!(worker_requests.try_recv().is_err(), "login is still busy");
+        let hints = app.key_hints();
+        let login_hint = hints
+            .spans
+            .iter()
+            .find(|span| span.content == "l")
+            .expect("login hint");
+        assert!(
+            login_hint
+                .style
+                .add_modifier
+                .contains(ratatui::style::Modifier::DIM)
+        );
+
+        // Replies sent before the worker saw the cancellation are ignored.
+        app.handle(Reply::Login(LoginEvent::WaitingForSecondFactor));
+        assert!(matches!(app.session, Session::LoggedOut));
+        app.handle(Reply::LoginDone(Err("login cancelled".to_string())));
+        assert!(!app.busy());
+        assert_eq!(app.status, "Not logged in");
+
+        app.on_key(login_key);
+        let Request::Login(cancel) = worker_requests.try_recv().expect("new login request") else {
+            panic!("login request");
+        };
+        assert!(!cancel.load(Ordering::Relaxed));
+        app.handle(Reply::Login(LoginEvent::WaitingForSecondFactor));
+        let Session::LoggingIn(login) = &app.session else {
+            panic!("new login dialog");
+        };
+        assert_eq!(login.status, "Approve the login on your linked device.");
+
+        app.handle(Reply::LoginDone(Ok(())));
+        assert!(matches!(app.session, Session::LoggedIn(None)));
+        assert!(matches!(worker_requests.try_recv(), Ok(Request::Refresh)));
+    }
+
+    #[test]
+    fn logout_waits_for_the_current_request() {
+        let (requests, worker_requests) = mpsc::channel();
+        let (_, replies) = mpsc::channel();
+        let mut app = App::new(requests, replies);
+        app.refresh();
+        assert!(matches!(worker_requests.try_recv(), Ok(Request::Refresh)));
+        let logout_key = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE);
+        app.on_key(logout_key);
+        assert!(worker_requests.try_recv().is_err());
+
+        app.handle(Reply::Error("try again".to_string()));
+        app.on_key(logout_key);
+        assert!(matches!(worker_requests.try_recv(), Ok(Request::Logout)));
     }
 
     #[test]
