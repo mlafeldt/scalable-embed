@@ -18,6 +18,7 @@ mod cli;
 mod command_handlers;
 mod config;
 pub mod dpop;
+pub mod embed;
 mod execution_context;
 mod fixed_term_commands;
 mod fixed_term_projections;

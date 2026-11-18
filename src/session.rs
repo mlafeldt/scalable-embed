@@ -493,7 +493,7 @@ fn lock_file_exclusive(_file: &fs::File) -> Result<()> {
 }
 
 fn keyring_entry(user: &str) -> Result<keyring_core::Entry> {
-    keyring_provider::entry(KEYRING_SERVICE, user).map_err(map_keyring_error)
+    keyring_provider::entry(crate::embed::keyring_service_or(KEYRING_SERVICE), user).map_err(map_keyring_error)
 }
 
 fn keyring_probe_error(keyring: &KeyringStore) -> Option<String> {

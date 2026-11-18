@@ -403,6 +403,9 @@ fn sync_parent_dir(_dir: &Path) -> Result<()> {
 }
 
 fn default_config_dir_path() -> Result<PathBuf> {
+    if let Some(dir) = crate::embed::config_dir_override() {
+        return Ok(dir.to_path_buf());
+    }
     #[cfg(any(test, debug_assertions))]
     {
         if let Ok(raw_dir) = std::env::var("SC_CONFIG_DIR") {

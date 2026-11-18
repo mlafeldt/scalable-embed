@@ -9,6 +9,7 @@ name = "sc"
 path = "src/main.rs"
 
 [features]
+default = ["channel-prod"]
 channel-prod = []
 
 [build-dependencies]
