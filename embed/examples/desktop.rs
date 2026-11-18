@@ -263,12 +263,6 @@ query DesktopSnapshot($accountId: ID!, $portfolioId: ID!) {
         items {
           isin
           name
-          inventory {
-            position {
-              filled
-              fifoPrice
-            }
-          }
           portfolioIsinPerformance {
             valuation
           }
@@ -294,23 +288,12 @@ fn snapshot(client: &mut Client) -> Result<Snapshot> {
         .as_array()
         .context("unexpected DesktopSnapshot response")?;
 
-    let mut changes = per_timeframe(
-        &valuation["timeWeightedReturnByTimeframe"],
-        "simpleAbsoluteReturn",
-    );
-    // The overview has no since-buy figure, so add up each position's gain
-    // over its average buy price.
+    let returns = &valuation["timeWeightedReturnByTimeframe"];
+    let mut changes = per_timeframe(returns, "simpleAbsoluteReturn");
+    // The portfolio has no since-buy figure. Scalable shows its MAX return
+    // instead, which also counts gains on positions sold since.
     if let Some(since_buy) = TIMEFRAMES.iter().position(|(t, _)| *t == "SINCE_BUY") {
-        changes[since_buy] = items
-            .iter()
-            .map(|item| {
-                let position = &item["inventory"]["position"];
-                Some(
-                    decimal(&item["portfolioIsinPerformance"]["valuation"])?
-                        - decimal(&position["filled"])? * decimal(&position["fifoPrice"])?,
-                )
-            })
-            .sum();
+        changes[since_buy] = pick(returns, "MAX", "simpleAbsoluteReturn");
     }
     let rows = items
         .iter()
@@ -335,12 +318,15 @@ fn snapshot(client: &mut Client) -> Result<Snapshot> {
 /// Picks `field` from a list of `{timeframe, ...}` entries for each of
 /// `TIMEFRAMES`.
 fn per_timeframe(list: &Value, field: &str) -> PerTimeframe {
-    let list = list.as_array().map(Vec::as_slice).unwrap_or_default();
-    TIMEFRAMES.map(|(timeframe, _)| {
-        list.iter()
-            .find(|entry| entry["timeframe"] == timeframe)
-            .and_then(|entry| decimal(&entry[field]))
-    })
+    TIMEFRAMES.map(|(timeframe, _)| pick(list, timeframe, field))
+}
+
+/// Picks `field` from the `{timeframe, ...}` entry for `timeframe`.
+fn pick(list: &Value, timeframe: &str, field: &str) -> Option<f64> {
+    list.as_array()?
+        .iter()
+        .find(|entry| entry["timeframe"] == timeframe)
+        .and_then(|entry| decimal(&entry[field]))
 }
 
 /// The API sends some decimals as strings.
