@@ -10,9 +10,9 @@ return the same JSON `data` that `sc <command> --json` prints and keep the
 CLI's behavior, including the two-step trade and savings-plan confirmation
 flows.
 
-![The desktop example showing a portfolio's total, today's change and its holdings ranked by today's return](screenshots/desktop.png)
+![The terminal example showing a portfolio's total, today's change and its holdings ranked by today's return](screenshots/terminal.png)
 
-*The [desktop example](#usage) with made-up data.*
+*The [terminal example](#usage) with made-up data.*
 
 ## Usage
 
@@ -39,29 +39,18 @@ println!("{:?}", overview.result.valuation.total);
 let txs = client.run(["broker", "transactions"])?;       // any sc command, raw JSON
 ```
 
-Two complete programs live in `embed/examples/`. Both share their session and
-files, and both take `--file-session` to keep the session in a file instead of
-the keychain.
-
-`terminal.rs` runs commands:
-
-```bash
-cd embed
-cargo run --example terminal -- login
-cargo run --example terminal -- overview
-cargo run --example terminal -- logout
-```
-
-`desktop/` is a minimal desktop app built with
-[saudade](https://github.com/roblillack/saudade). It shows the portfolio total,
-and its change and the holdings ranked by their return over a timeframe picked
-in the Timeframe menu. It fetches all of it with one `query` at startup and on
-Refresh (button or Cmd/Ctrl+R), and logs in from a dialog:
+A complete program lives in `embed/examples/terminal/`: a minimal terminal app
+built with [ratatui](https://ratatui.rs). It shows the portfolio total, and its
+change and the holdings ranked by their return over a timeframe picked with Tab.
+It fetches all of it with one `query` at startup and on refresh, and logs in
+from a dialog:
 
 ```bash
 cd embed
-cargo run --example desktop
+cargo run --example terminal
 ```
+
+Pass `--file-session` to keep the session in a file instead of the keychain.
 
 Typed results (`src/embed/types.rs`) exist for `broker overview`, `broker
 holdings` and `broker quote` so far; every other command is available through
@@ -87,10 +76,10 @@ when only a new login helps.
 - Use an app-specific `config_dir` and `keyring_service` so the app and the
   `sc` CLI never overwrite each other's session.
 - Calls block. In async UIs, run them on a blocking thread; calling them
-  directly inside an async runtime panics. The desktop example gives the client
-  its own thread and polls for replies.
+  directly inside an async runtime panics. The example gives the client its
+  own thread and polls for replies.
 - On macOS, every rebuild of an unsigned binary asks again for access to the
-  session in the keychain. Pass `--file-session` to the examples while
+  session in the keychain. Pass `--file-session` to the example while
   developing to avoid that.
 - The library authenticates as the official CLI (same OAuth client and API
   endpoint). Scalable can change or restrict these at any time.
@@ -116,10 +105,10 @@ The repository is upstream's code plus a few additions. The root package keeps
 upstream's name, `scalable-cli`, so merging upstream releases doesn't conflict
 in `Cargo.toml` or `Cargo.lock`. The `scalable-embed` crate in `embed/`
 re-exports its `embed` module under the library's own name and holds the
-examples, which can add dependencies without touching the root `Cargo.lock`.
+example, which can add dependencies without touching the root `Cargo.lock`.
 
 New code lives in `src/embed.rs`, `src/embed/`, `embed/` and `tests/embed.rs`.
-This README and its screenshots live in `.github/`, so GitHub shows it instead
+This README and its screenshot live in `.github/`, so GitHub shows it instead
 of upstream's `README.md`. Changes to upstream files are limited to these hooks:
 
 | File | Change |

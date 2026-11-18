@@ -10,8 +10,6 @@ use scalable_embed::{Client, LoginEvent, Options, SessionBackendPreference, Time
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::TIMEFRAMES;
-
 pub enum Request {
     Refresh,
     /// `cancel` cancels this login only.
@@ -44,6 +42,37 @@ impl Reply {
         !matches!(self, Reply::Login { .. })
     }
 }
+
+/// A timeframe to pick.
+pub struct TimeframeChoice {
+    pub label: &'static str,
+    /// For the holdings' returns.
+    holdings: Timeframe,
+    /// For the portfolio's change.
+    portfolio: Timeframe,
+}
+
+const fn choice(label: &'static str, holdings: Timeframe, portfolio: Timeframe) -> TimeframeChoice {
+    TimeframeChoice {
+        label,
+        holdings,
+        portfolio,
+    }
+}
+
+pub const TIMEFRAMES: [TimeframeChoice; 6] = {
+    use Timeframe::*;
+    [
+        choice("Today", Intraday, Intraday),
+        choice("Week", OneWeek, OneWeek),
+        choice("Month", OneMonth, OneMonth),
+        choice("Year to date", YearToDate, YearToDate),
+        choice("Year", OneYear, OneYear),
+        // The portfolio has no since-buy change. Scalable shows its MAX one
+        // instead, which also counts gains on positions sold since.
+        choice("Since buy", SinceBuy, Max),
+    ]
+};
 
 /// One value per entry in `TIMEFRAMES`.
 pub type PerTimeframe = [Option<f64>; TIMEFRAMES.len()];
@@ -117,7 +146,7 @@ fn run(requests: Receiver<Request>, replies: Sender<Reply>, file_session: bool) 
     }
 }
 
-/// Same files and keychain entry as the terminal example.
+/// With files and a keychain entry of its own, apart from the `sc` CLI's.
 fn client(file_session: bool) -> anyhow::Result<Client> {
     let home = std::env::var_os("HOME").context("HOME is not set")?;
     let config_dir = std::path::Path::new(&home).join(".config/scalable-embed-example");
@@ -128,11 +157,11 @@ fn client(file_session: bool) -> anyhow::Result<Client> {
     Ok(Client::new(options)?)
 }
 
-/// Everything the window shows, in one request: upstream's overview and
+/// Everything the screen shows, in one request: upstream's overview and
 /// holdings queries trimmed to the fields used here, plus each security's
 /// performances, which upstream only fetches per security in `broker quote`.
 const SNAPSHOT_QUERY: &str = r#"
-query DesktopSnapshot($accountId: ID!, $portfolioId: ID!) {
+query ExampleSnapshot($accountId: ID!, $portfolioId: ID!) {
   account(id: $accountId) {
     brokerPortfolio(id: $portfolioId) {
       valuation(includeYearToDate: true) {
@@ -237,7 +266,7 @@ struct Performance {
 fn snapshot(client: &mut Client) -> scalable_embed::Result<Snapshot> {
     let ids = client.broker_ids(None)?;
     let variables = json!({"accountId": ids.account_id, "portfolioId": ids.portfolio_id});
-    let data: Data = client.query_as("DesktopSnapshot", SNAPSHOT_QUERY, variables)?;
+    let data: Data = client.query_as("ExampleSnapshot", SNAPSHOT_QUERY, variables)?;
     Ok(Snapshot::from(data))
 }
 
