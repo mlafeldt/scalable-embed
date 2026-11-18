@@ -161,12 +161,7 @@ of upstream's `README.md`. Changes to upstream files are limited to these hooks:
 | `src/session.rs` | keyring service honors the embedder's override |
 | `src/dpop/secure_enclave.rs` | two label overrides; namespace construction lives in `embed` |
 
-Keep it that way: change upstream files only in these hooks, add no
-dependencies to the root package, and don't reformat upstream code. Upstream
-changes the root `Cargo.lock` with every release, so a dependency added there
-conflicts on each sync. The `embed/` crate has a `Cargo.lock` of its own and can
-depend on anything, so code that doesn't need upstream's internals belongs
-there.
+`AGENTS.md` holds the rule that keeps it that way.
 
 ## Syncing with upstream
 
