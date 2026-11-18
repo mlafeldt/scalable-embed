@@ -1,9 +1,9 @@
 //! Minimal embedder: what a desktop app's backend would do.
 //!
-//!   cargo run --example embed -- login
-//!   cargo run --example embed -- broker overview   # raw JSON, any sc command
-//!   cargo run --example embed -- overview          # typed
-//!   cargo run --example embed -- logout
+//!   cargo run --example terminal -- login
+//!   cargo run --example terminal -- broker overview   # raw JSON, any sc command
+//!   cargo run --example terminal -- overview          # typed
+//!   cargo run --example terminal -- logout
 //!
 //! The session goes to the OS keychain; the signing key and other files go to
 //! ~/.config/scalable-embed-example, next to the CLI's ~/.config/scalable-cli.
@@ -13,7 +13,7 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use scalable_cli::embed::{
+use scalable_embed::{
     Client, DeviceCodePrompt, LoginProgressSink, Options, SessionBackendPreference,
 };
 
@@ -53,7 +53,10 @@ fn main() -> Result<()> {
         args.remove(0);
     }
     let command = &args[..];
-    anyhow::ensure!(!command.is_empty(), "usage: embed [--file-session] <command...>");
+    anyhow::ensure!(
+        !command.is_empty(),
+        "usage: terminal [--file-session] <command...>"
+    );
     let home = std::env::var_os("HOME").context("HOME is not set")?;
     let config_dir = std::path::Path::new(&home).join(".config/scalable-embed-example");
 
@@ -66,14 +69,20 @@ fn main() -> Result<()> {
     if command.first().is_some_and(|c| c == "login") {
         let ctx = client.login(
             |p: &DeviceCodePrompt| {
-                let url = p.verification_uri_complete.as_ref().unwrap_or(&p.verification_uri);
+                let url = p
+                    .verification_uri_complete
+                    .as_ref()
+                    .unwrap_or(&p.verification_uri);
                 eprintln!("code {} — confirm at {url}", p.user_code);
                 let _ = std::process::Command::new("open").arg(url).status();
                 Ok(())
             },
             &mut Progress,
         )?;
-        eprintln!("account {}, portfolio {:?}", ctx.account_id, ctx.portfolio_id);
+        eprintln!(
+            "account {}, portfolio {:?}",
+            ctx.account_id, ctx.portfolio_id
+        );
         return Ok(());
     }
 

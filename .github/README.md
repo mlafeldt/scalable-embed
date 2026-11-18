@@ -44,12 +44,13 @@ println!("{:?}", overview.result.valuation.total);
 let holdings = client.run(["broker", "holdings"])?;      // any sc command, raw JSON
 ```
 
-`examples/embed.rs` is a complete program:
+`embed/examples/terminal.rs` is a complete program:
 
 ```bash
-cargo run --example embed -- login
-cargo run --example embed -- overview
-cargo run --example embed -- logout
+cd embed
+cargo run --example terminal -- login
+cargo run --example terminal -- overview
+cargo run --example terminal -- logout
 ```
 
 Typed results (`src/embed/types.rs`) exist for `broker overview` so far; every
@@ -69,11 +70,11 @@ format change fails `cargo test` after merging an upstream release.
 The repository is upstream's code plus a few additions. The root package keeps
 upstream's name, `scalable-cli`, so merging upstream releases doesn't conflict
 in `Cargo.toml` or `Cargo.lock`. The `scalable-embed` crate in `embed/`
-re-exports its `embed` module under the library's own name.
+re-exports its `embed` module under the library's own name and holds the
+examples, which can add dependencies without touching the root `Cargo.lock`.
 
-New code lives in `src/embed.rs`, `src/embed/`, `embed/`, `examples/embed.rs`,
-`tests/embed.rs` and this README, which GitHub shows instead of upstream's
-`README.md`. Changes to upstream files are limited to these hooks:
+New code lives in `src/embed.rs`, `src/embed/`, `embed/`, `tests/embed.rs` and
+this README, which GitHub shows instead of upstream's `README.md`. Changes to upstream files are limited to these hooks:
 
 | File | Change |
 | --- | --- |
