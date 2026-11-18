@@ -10,6 +10,10 @@ return the same JSON `data` that `sc <command> --json` prints and keep the
 CLI's behavior, including the two-step trade and savings-plan confirmation
 flows.
 
+![The desktop example showing a portfolio's total, today's change and its holdings ranked by today's return](screenshots/desktop.png)
+
+*The [desktop example](#usage) with made-up data.*
+
 ## Security
 
 Out of the box, this library is less secure than the official CLI. On macOS,
@@ -101,8 +105,9 @@ in `Cargo.toml` or `Cargo.lock`. The `scalable-embed` crate in `embed/`
 re-exports its `embed` module under the library's own name and holds the
 examples, which can add dependencies without touching the root `Cargo.lock`.
 
-New code lives in `src/embed.rs`, `src/embed/`, `embed/`, `tests/embed.rs` and
-this README, which GitHub shows instead of upstream's `README.md`. Changes to upstream files are limited to these hooks:
+New code lives in `src/embed.rs`, `src/embed/`, `embed/` and `tests/embed.rs`.
+This README and its screenshots live in `.github/`, so GitHub shows it instead
+of upstream's `README.md`. Changes to upstream files are limited to these hooks:
 
 | File | Change |
 | --- | --- |
