@@ -1,7 +1,8 @@
 //! Minimal desktop app: portfolio total, and its change and the holdings ranked
-//! by their return over a timeframe picked in the View menu. Loads at startup
-//! and on Refresh (button or Cmd/Ctrl+R), in one request. Built with saudade, a
-//! small retained-mode GUI toolkit. Shares its files with the terminal example.
+//! by their return over a timeframe picked in the Timeframe menu. Loads at
+//! startup and on Refresh (button or Cmd/Ctrl+R), in one request. Built with
+//! saudade, a small retained-mode GUI toolkit. Shares its files with the
+//! terminal example.
 //!
 //!   cargo run --example desktop
 //!   cargo run --example desktop -- --file-session
@@ -39,7 +40,7 @@ const MENU_H: i32 = 20;
 const LOGIN_W: i32 = 340;
 const LOGIN_H: i32 = 170;
 
-/// The timeframes in the View menu: API name, and menu and header label.
+/// The timeframes in the Timeframe menu: API name, and menu and header label.
 const TIMEFRAMES: [(&str, &str); 6] = [
     ("INTRADAY", "Today"),
     ("ONE_WEEK", "Week"),
@@ -121,7 +122,7 @@ fn main() {
                 MenuItem::action("&Quit", |cx| cx.close()),
             ],
         ))
-        .add_menu(Menu::new("&View", timeframes));
+        .add_menu(Menu::new("&Timeframe", timeframes));
 
     let ui = Column::new()
         .add_fixed(menu, MENU_H)

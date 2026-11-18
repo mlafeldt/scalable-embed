@@ -60,8 +60,8 @@ cargo run --example terminal -- logout
 `desktop.rs` is a minimal desktop app built with
 [saudade](https://github.com/roblillack/saudade). It shows the portfolio total,
 and its change and the holdings ranked by their return over a timeframe picked
-in the View menu. It fetches all of it in one `graphql` request at startup and
-on Refresh (button or Cmd/Ctrl+R), and logs in from a dialog:
+in the Timeframe menu. It fetches all of it in one `graphql` request at startup
+and on Refresh (button or Cmd/Ctrl+R), and logs in from a dialog:
 
 ```bash
 cd embed
