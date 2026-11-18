@@ -1,7 +1,8 @@
 //! Minimal embedder: what a desktop app's backend would do.
 //!
 //!   cargo run --example embed -- login
-//!   cargo run --example embed -- broker overview
+//!   cargo run --example embed -- broker overview   # raw JSON, any sc command
+//!   cargo run --example embed -- overview          # typed
 //!   cargo run --example embed -- logout
 //!
 //! The session goes to the OS keychain; the signing key and other files go to
@@ -73,6 +74,12 @@ fn main() -> Result<()> {
             &mut Progress,
         )?;
         eprintln!("account {}, portfolio {:?}", ctx.account_id, ctx.portfolio_id);
+        return Ok(());
+    }
+
+    if command.first().is_some_and(|c| c == "overview") {
+        let overview = client.broker_overview(None, false)?;
+        println!("{overview:#?}");
         return Ok(());
     }
 

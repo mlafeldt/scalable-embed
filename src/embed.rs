@@ -10,9 +10,14 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
+
+mod types;
+
+pub use types::*;
 
 pub use crate::auth::{DeviceCodePrompt, LoginProgressSink};
 pub use crate::broker_context::BrokerContext;
@@ -130,9 +135,51 @@ impl Client {
     {
         let argv = std::iter::once(OsString::from("sc")).chain(args.into_iter().map(Into::into));
         let crate::cli::Cli { command } = crate::cli::Cli::try_parse_from(argv)?;
+        self.run_command(command)
+    }
+
+    /// Like `run`, but deserializes the result into your own type, for
+    /// commands that have no typed method here yet.
+    pub fn run_as<R, I, T>(&mut self, args: I) -> Result<R>
+    where
+        R: DeserializeOwned,
+        I: IntoIterator<Item = T>,
+        T: Into<OsString> + Clone,
+    {
+        parse(self.run(args)?)
+    }
+
+    /// `sc broker overview`. With `portfolio_id: None`, uses the portfolio
+    /// saved at login.
+    pub fn broker_overview(
+        &mut self,
+        portfolio_id: Option<&str>,
+        include_year_to_date: bool,
+    ) -> Result<BrokerResult<Overview>> {
+        use crate::cli::{BrokerArgs, BrokerCommand, BrokerOverviewArgs, Commands};
+        let command = Commands::Broker(BrokerArgs {
+            command: BrokerCommand::Overview(BrokerOverviewArgs {
+                portfolio_id: portfolio_id.map(str::to_string),
+                include_year_to_date,
+                json: true,
+            }),
+        });
+        parse(self.run_command(command)?)
+    }
+
+    fn run_command(&mut self, command: crate::cli::Commands) -> Result<Value> {
         let command = crate::normalize_command(command)?;
         crate::run_machine_command(command, &self.config, &mut self.session_manager)
     }
+}
+
+fn parse<R: DeserializeOwned>(data: Value) -> Result<R> {
+    serde_json::from_value(data).with_context(|| {
+        format!(
+            "unexpected result shape for {}; did the upstream JSON output change?",
+            std::any::type_name::<R>()
+        )
+    })
 }
 
 fn set_once<T: PartialEq>(cell: &OnceLock<T>, value: T, name: &str) -> Result<()> {
