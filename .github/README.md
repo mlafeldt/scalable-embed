@@ -22,11 +22,17 @@ scalable-embed = { git = "https://github.com/mlafeldt/scalable-embed" }
 ```
 
 ```rust
-use scalable_embed::{Client, Options};
+use std::ops::ControlFlow;
+use scalable_embed::{Client, LoginEvent, Options};
 
 let mut client = Client::new(Options::new(app_config_dir, "com.example.myapp"))?;
 if !client.is_logged_in()? {
-    client.login(|prompt| show_code_and_open_browser(prompt), &mut my_progress_ui)?;
+    client.login(|event| {
+        if let LoginEvent::DeviceCode(prompt) = &event {
+            show_code_and_open_browser(&prompt.user_code, prompt.url());
+        }
+        if cancel_clicked() { ControlFlow::Break(()) } else { ControlFlow::Continue(()) }
+    })?;
 }
 let overview = client.broker_overview(None, false)?;     // typed
 println!("{:?}", overview.result.valuation.total);
@@ -46,11 +52,11 @@ cargo run --example terminal -- overview
 cargo run --example terminal -- logout
 ```
 
-`desktop.rs` is a minimal desktop app built with
+`desktop/` is a minimal desktop app built with
 [saudade](https://github.com/roblillack/saudade). It shows the portfolio total,
 and its change and the holdings ranked by their return over a timeframe picked
-in the Timeframe menu. It fetches all of it in one `graphql` request at startup
-and on Refresh (button or Cmd/Ctrl+R), and logs in from a dialog:
+in the Timeframe menu. It fetches all of it with one `query` at startup and on
+Refresh (button or Cmd/Ctrl+R), and logs in from a dialog:
 
 ```bash
 cd embed
@@ -59,17 +65,24 @@ cargo run --example desktop
 
 Typed results (`src/embed/types.rs`) exist for `broker overview`, `broker
 holdings` and `broker quote` so far; every other command is available through
-`run` (raw JSON) or `run_as::<T>` with your own serde type. The typed structs ignore unknown fields
-and treat values as optional, and their tests run upstream's real projection
-code, so an upstream format change fails `cargo test` after merging an upstream
-release.
+`run` (raw JSON) or `run_as::<T>` with your own serde type. The typed structs
+ignore unknown fields and treat values as optional, and their tests run
+upstream's real projection code, so an upstream format change fails `cargo test`
+after merging an upstream release.
 
-`graphql` sends a query of your own, with the session, request signing and token
-refresh handled as for commands. The backend rate-limits requests
-(`RATE_LIMITED`), so use it to fetch in one request what takes several
-commands, such as per-holding returns, which `broker quote` fetches one security
-at a time. Upstream doesn't maintain these queries, so an API change breaks them
+`query` sends a GraphQL query of your own, with the session, request signing and
+token refresh handled as for commands; `broker_ids` gives the account and
+portfolio IDs most queries need, and `query_as::<T>` deserializes the result.
+The backend rate-limits requests (`RATE_LIMITED`), so use it to fetch in one
+request what takes several commands, such as per-holding returns, which `broker
+quote` fetches one security at a time. It rejects mutations, so trades and other
+changes keep going through commands, with their confirmation flows and trade
+controls. Upstream doesn't maintain these queries, so an API change breaks them
 without a failing test.
+
+Errors carry the code `sc --json` reports, such as `no_session`, `rate_limited`
+or `network_error`, so apps can match on `err.code()`; `err.needs_login()` tells
+when only a new login helps.
 
 - Use an app-specific `config_dir` and `keyring_service` so the app and the
   `sc` CLI never overwrite each other's session.
@@ -113,7 +126,7 @@ of upstream's `README.md`. Changes to upstream files are limited to these hooks:
 | --- | --- |
 | `Cargo.toml` | `channel-prod` is a default feature (the public repo has no `build.rs` for the dev channel) |
 | `src/lib.rs` | declares `pub mod embed` |
-| `src/auth.rs` | device-code login split so the prompt and progress can go to caller hooks; `DeviceCodePrompt` and `LoginProgressSink` are public |
+| `src/auth.rs` | device-code login split so the prompt and progress can go to caller hooks; `DeviceCodePrompt` is public, `LoginProgressSink` crate-visible |
 | `src/config.rs` | config dir honors the embedder's override |
 | `src/session.rs` | keyring service honors the embedder's override |
 

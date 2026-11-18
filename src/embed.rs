@@ -6,20 +6,27 @@
 //! All calls block. In async UIs, run them on a blocking thread
 //! (e.g. `tokio::task::spawn_blocking`) and guard the `Client` with a mutex.
 
+use std::cell::{Cell, RefCell};
 use std::ffi::OsString;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::Context;
 use clap::Parser;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
+mod document;
+mod error;
 mod types;
 
+pub use error::{Error, Result};
 pub use types::*;
 
-pub use crate::auth::{DeviceCodePrompt, LoginProgressSink};
+pub use crate::auth::DeviceCodePrompt;
+use crate::auth::LoginProgressSink;
 pub use crate::broker_context::BrokerContext;
 pub use crate::config::{
     AppConfig, DpopKeyBackend, Pkcs11Config, RuntimeAuthConfig, SessionBackendPreference,
@@ -27,15 +34,17 @@ pub use crate::config::{
 };
 use crate::session::SessionManager;
 
-static CONFIG_DIR: OnceLock<PathBuf> = OnceLock::new();
-static KEYRING_SERVICE: OnceLock<String> = OnceLock::new();
+/// Config dir and keyring service, set by the first `Client::new`.
+static STORAGE: OnceLock<(PathBuf, String)> = OnceLock::new();
 
 pub(crate) fn config_dir_override() -> Option<&'static Path> {
-    CONFIG_DIR.get().map(PathBuf::as_path)
+    STORAGE.get().map(|(dir, _)| dir.as_path())
 }
 
 pub(crate) fn keyring_service_or(default: &'static str) -> &'static str {
-    KEYRING_SERVICE.get().map_or(default, String::as_str)
+    STORAGE
+        .get()
+        .map_or(default, |(_, service)| service.as_str())
 }
 
 pub struct Options {
@@ -74,11 +83,19 @@ pub struct Client {
 }
 
 impl Client {
-    /// Storage locations are process-wide: a second `Client` in the same
-    /// process must use the same `config_dir` and `keyring_service`.
+    /// Storage locations are process-wide: the first call sets them, even if
+    /// it fails, and later calls must pass the same `config_dir` and
+    /// `keyring_service`.
     pub fn new(options: Options) -> Result<Self> {
-        set_once(&CONFIG_DIR, options.config_dir, "config_dir")?;
-        set_once(&KEYRING_SERVICE, options.keyring_service, "keyring_service")?;
+        let storage = (options.config_dir, options.keyring_service);
+        if let Err(storage) = STORAGE.set(storage)
+            && STORAGE.get() != Some(&storage)
+        {
+            return Err(Error::invalid_input(
+                "embed::Client storage is process-wide and already set to a different \
+                 config_dir or keyring_service",
+            ));
+        }
         let session_manager = SessionManager::new(&options.config)?;
         Ok(Self {
             config: options.config,
@@ -86,34 +103,48 @@ impl Client {
         })
     }
 
-    /// Device-code login. `on_device_code` receives the code and URL to show
-    /// (and typically opens the browser); `progress` receives polling and 2FA
-    /// events and must sleep for the durations passed to its `wait_*` methods.
-    /// Like `sc login`, it then saves the default account and portfolio.
+    /// Device-code login. `on_event` first gets the code to show (and
+    /// typically open in the browser), then the current wait about every
+    /// 100 ms until the login ends. Return `ControlFlow::Break(())` to cancel
+    /// the login, which then fails with code `login_cancelled`; a request
+    /// already sent finishes first.
+    ///
+    /// Like `sc login`, it then saves and returns the default account and
+    /// portfolio. If that fails, the login still succeeds with `None`, and
+    /// commands look them up on each call.
     pub fn login(
         &mut self,
-        on_device_code: impl FnMut(&DeviceCodePrompt) -> Result<()>,
-        progress: &mut impl LoginProgressSink,
-    ) -> Result<BrokerContext> {
+        on_event: impl FnMut(LoginEvent) -> ControlFlow<()>,
+    ) -> Result<Option<BrokerContext>> {
         let env = crate::channel::current_env();
         let env_cfg = crate::channel::current_env_config();
         let dpop_options = crate::channel::current_dpop_runtime_options(&self.config);
-        crate::transport_security::validate_env_transport_security(&env_cfg)?;
-        crate::auth::login_with_device_code_events(
+        let events = LoginEvents {
+            on_event: RefCell::new(on_event),
+            cancelled: Cell::new(false),
+        };
+        let result = crate::auth::login_with_device_code_events(
             &mut self.session_manager,
             env,
             &env_cfg,
             None,
             &dpop_options,
-            on_device_code,
-            progress,
-        )?;
+            |prompt| events.send(LoginEvent::DeviceCode(prompt.clone())),
+            &mut &events,
+        );
+        if events.cancelled.get() {
+            return Err(Error::new(Error::LOGIN_CANCELLED, "login cancelled"));
+        }
+        result?;
         crate::cleanup_broker_context_best_effort();
-        crate::broker_commands::bootstrap_broker_context_after_login(
-            &mut self.session_manager,
-            env,
-            &env_cfg,
-            &dpop_options,
+        Ok(
+            crate::broker_commands::bootstrap_broker_context_after_login(
+                &mut self.session_manager,
+                env,
+                &env_cfg,
+                &dpop_options,
+            )
+            .ok(),
         )
     }
 
@@ -156,15 +187,13 @@ impl Client {
         portfolio_id: Option<&str>,
         include_year_to_date: bool,
     ) -> Result<BrokerResult<Overview>> {
-        use crate::cli::{BrokerArgs, BrokerCommand, BrokerOverviewArgs, Commands};
-        let command = Commands::Broker(BrokerArgs {
-            command: BrokerCommand::Overview(BrokerOverviewArgs {
+        self.broker(crate::cli::BrokerCommand::Overview(
+            crate::cli::BrokerOverviewArgs {
                 portfolio_id: portfolio_id.map(str::to_string),
                 include_year_to_date,
                 json: true,
-            }),
-        });
-        parse(self.run_command(command)?)
+            },
+        ))
     }
 
     /// `sc broker holdings`. With `portfolio_id: None`, uses the portfolio
@@ -173,16 +202,15 @@ impl Client {
         &mut self,
         portfolio_id: Option<&str>,
     ) -> Result<BrokerResult<Holdings>> {
-        use crate::cli::{BrokerArgs, BrokerCommand, BrokerHoldingsArgs, Commands};
-        let command = Commands::Broker(BrokerArgs {
-            command: BrokerCommand::Holdings(BrokerHoldingsArgs {
+        self.broker(crate::cli::BrokerCommand::Holdings(
+            crate::cli::BrokerHoldingsArgs {
                 portfolio_id: portfolio_id.map(str::to_string),
+                // Only affects quote performances, which holdings don't show.
                 include_year_to_date: false,
                 quote_source: None,
                 json: true,
-            }),
-        });
-        parse(self.run_command(command)?)
+            },
+        ))
     }
 
     /// `sc broker quote`. With `portfolio_id: None`, uses the portfolio saved
@@ -193,30 +221,69 @@ impl Client {
         isin: &str,
         include_year_to_date: bool,
     ) -> Result<BrokerResult<Quote>> {
-        use crate::cli::{BrokerArgs, BrokerCommand, BrokerQuoteArgs, Commands};
-        let command = Commands::Broker(BrokerArgs {
-            command: BrokerCommand::Quote(BrokerQuoteArgs {
+        self.broker(crate::cli::BrokerCommand::Quote(
+            crate::cli::BrokerQuoteArgs {
                 portfolio_id: portfolio_id.map(str::to_string),
                 isin: isin.to_string(),
                 include_year_to_date,
                 quote_source: None,
                 json: true,
-            }),
-        });
-        parse(self.run_command(command)?)
+            },
+        ))
     }
 
-    /// Sends your own GraphQL query to the broker API and returns its `data`.
-    /// Adds `accountId` and `portfolioId` to `variables` (with `portfolio_id:
-    /// None`, the portfolio saved at login). Upstream doesn't maintain these
-    /// queries, so an API change breaks them without a failing test here.
-    pub fn graphql(
-        &mut self,
-        operation_name: &str,
-        query: &str,
-        portfolio_id: Option<&str>,
-        mut variables: serde_json::Map<String, Value>,
-    ) -> Result<Value> {
+    /// The account and portfolio IDs broker commands use, for the variables
+    /// of your own queries. With `portfolio_id: None`, the portfolio saved at
+    /// login.
+    pub fn broker_ids(&mut self, portfolio_id: Option<&str>) -> Result<BrokerIds> {
+        let dpop_options = crate::channel::current_dpop_runtime_options(&self.config);
+        let env = crate::resolve_active_env(&self.session_manager)?;
+        let env_cfg = crate::channel::current_env_config();
+        let mut session = crate::active_session::load_active_session(
+            &mut self.session_manager,
+            env,
+            &env_cfg,
+            &dpop_options,
+        )?
+        .session;
+        let ids = crate::broker_shared::resolve_broker_ids(
+            &mut self.session_manager,
+            env,
+            &env_cfg,
+            &mut session,
+            &dpop_options,
+            portfolio_id,
+        )?;
+        Ok(BrokerIds {
+            account_id: ids.account_id,
+            portfolio_id: ids.portfolio_id,
+        })
+    }
+
+    /// Sends a GraphQL query of your own to the broker API and returns its
+    /// `data`, with the session, request signing and token refresh handled
+    /// as for commands. `variables` is a JSON object or null.
+    ///
+    /// Only for reading: a document with a mutation or subscription fails
+    /// with `invalid_input`, so trades and other changes go through commands,
+    /// with their confirmation flows and trade controls. Upstream doesn't
+    /// maintain these queries, so an API change breaks them without a failing
+    /// test here.
+    pub fn query(&mut self, operation_name: &str, query: &str, variables: Value) -> Result<Value> {
+        if !document::only_queries(query) {
+            return Err(Error::invalid_input(
+                "query: mutations and subscriptions aren't allowed; use commands instead",
+            ));
+        }
+        let variables = match variables {
+            Value::Null => Value::Object(Default::default()),
+            Value::Object(_) => variables,
+            _ => {
+                return Err(Error::invalid_input(
+                    "query: variables must be a JSON object",
+                ));
+            }
+        };
         let dpop_options = crate::channel::current_dpop_runtime_options(&self.config);
         let env = crate::resolve_active_env(&self.session_manager)?;
         let env_cfg = crate::channel::current_env_config();
@@ -227,17 +294,7 @@ impl Client {
             &dpop_options,
         )?;
         let mut session = loaded.session;
-        let ids = crate::broker_shared::resolve_broker_ids(
-            &mut self.session_manager,
-            env,
-            &env_cfg,
-            &mut session,
-            &dpop_options,
-            portfolio_id,
-        )?;
-        variables.insert("accountId".into(), ids.account_id.into());
-        variables.insert("portfolioId".into(), ids.portfolio_id.into());
-        crate::session_refresh::execute_with_refresh_retry(
+        Ok(crate::session_refresh::execute_with_refresh_retry(
             &mut self.session_manager,
             env,
             &env_cfg,
@@ -254,29 +311,119 @@ impl Client {
                     &dpop_options,
                 )
             },
-        )
+        )?)
+    }
+
+    /// Like `query`, but deserializes the `data` into your own type. For
+    /// decimals the API sends as strings, see [`decimal`].
+    pub fn query_as<R: DeserializeOwned>(
+        &mut self,
+        operation_name: &str,
+        query: &str,
+        variables: Value,
+    ) -> Result<R> {
+        parse(self.query(operation_name, query, variables)?)
+    }
+
+    fn broker<R: DeserializeOwned>(&mut self, command: crate::cli::BrokerCommand) -> Result<R> {
+        let command = crate::cli::Commands::Broker(crate::cli::BrokerArgs { command });
+        parse(self.run_command(command)?)
     }
 
     fn run_command(&mut self, command: crate::cli::Commands) -> Result<Value> {
         let command = crate::normalize_command(command)?;
-        crate::run_machine_command(command, &self.config, &mut self.session_manager)
+        Ok(crate::run_machine_command(
+            command,
+            &self.config,
+            &mut self.session_manager,
+        )?)
+    }
+}
+
+/// The IDs most broker queries take as `$accountId` and `$portfolioId`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrokerIds {
+    pub account_id: String,
+    pub portfolio_id: String,
+}
+
+/// Login progress, for `Client::login`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoginEvent {
+    /// The code to show and confirm in the browser. Comes once, first.
+    DeviceCode(DeviceCodePrompt),
+    /// Waiting for the user to confirm the code in the browser.
+    WaitingForBrowser,
+    /// Waiting for the user to approve the login on their linked device.
+    WaitingForSecondFactor,
+}
+
+impl DeviceCodePrompt {
+    /// The page to confirm the code at, with the code filled in if possible.
+    pub fn url(&self) -> &str {
+        self.verification_uri_complete
+            .as_deref()
+            .unwrap_or(&self.verification_uri)
+    }
+}
+
+/// Turns upstream's login progress hooks into `LoginEvent`s, and does their
+/// waiting in short steps, asking `on_event` each time whether to go on.
+struct LoginEvents<F> {
+    on_event: RefCell<F>,
+    cancelled: Cell<bool>,
+}
+
+impl<F: FnMut(LoginEvent) -> ControlFlow<()>> LoginEvents<F> {
+    const STEP: Duration = Duration::from_millis(100);
+
+    fn send(&self, event: LoginEvent) -> anyhow::Result<()> {
+        if (self.on_event.borrow_mut())(event).is_break() {
+            self.cancelled.set(true);
+            anyhow::bail!("login cancelled");
+        }
+        Ok(())
+    }
+
+    fn wait(&self, event: LoginEvent, duration: Duration) -> anyhow::Result<()> {
+        let end = Instant::now() + duration;
+        loop {
+            self.send(event.clone())?;
+            let left = end.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Ok(());
+            }
+            std::thread::sleep(left.min(Self::STEP));
+        }
+    }
+}
+
+impl<F: FnMut(LoginEvent) -> ControlFlow<()>> LoginProgressSink for &LoginEvents<F> {
+    fn note_browser_confirmation_pending(&mut self, _pending_polls: u64) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn note_browser_confirmation_slow_down(&mut self, _interval_secs: u64) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn wait_for_browser_confirmation(&mut self, duration: Duration) -> anyhow::Result<()> {
+        self.wait(LoginEvent::WaitingForBrowser, duration)
+    }
+    fn note_second_factor_wait(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn wait_for_second_factor(&mut self, duration: Duration) -> anyhow::Result<()> {
+        self.wait(LoginEvent::WaitingForSecondFactor, duration)
+    }
+    fn finish(&mut self) -> anyhow::Result<()> {
+        Ok(())
     }
 }
 
 fn parse<R: DeserializeOwned>(data: Value) -> Result<R> {
-    serde_json::from_value(data).with_context(|| {
+    Ok(serde_json::from_value(data).with_context(|| {
         format!(
-            "unexpected result shape for {}; did the upstream JSON output change?",
+            "unexpected result shape for {}; did the API or upstream's JSON output change?",
             std::any::type_name::<R>()
         )
-    })
-}
-
-fn set_once<T: PartialEq>(cell: &OnceLock<T>, value: T, name: &str) -> Result<()> {
-    if let Err(value) = cell.set(value)
-        && cell.get() != Some(&value)
-    {
-        bail!("embed::Client {name} is process-wide and already set to a different value");
-    }
-    Ok(())
+    })?)
 }

@@ -16,12 +16,27 @@ pub struct BrokerResult<T> {
     pub result: T,
 }
 
+/// Where the command got its account and portfolio IDs from.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Resolution {
-    /// `auto_session_person_id` or `selected_context`.
-    pub account: String,
-    /// `explicit`, `selected_context` or `auto_resolved`.
-    pub portfolio: String,
+    pub account: IdSource,
+    pub portfolio: IdSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdSource {
+    /// Passed to the command (portfolios only).
+    Explicit,
+    /// Saved at login or with `sc broker context`.
+    SelectedContext,
+    /// The logged-in person's ID (accounts only).
+    AutoSessionPersonId,
+    /// Looked up from the API, as nothing was saved.
+    AutoResolve,
+    /// A source this version of the fork doesn't know yet.
+    #[serde(other)]
+    Unknown,
 }
 
 /// `sc broker overview`.
@@ -34,11 +49,11 @@ pub struct Overview {
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Valuation {
-    #[serde(default, deserialize_with = "number")]
+    #[serde(default, deserialize_with = "decimal")]
     pub total: Option<f64>,
-    #[serde(default, deserialize_with = "number")]
+    #[serde(default, deserialize_with = "decimal")]
     pub securities: Option<f64>,
-    #[serde(default, deserialize_with = "number")]
+    #[serde(default, deserialize_with = "decimal")]
     pub crypto: Option<f64>,
 }
 
@@ -51,7 +66,7 @@ pub struct OverviewTimestamps {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct TimeframeReturn {
     pub timeframe: Timeframe,
-    #[serde(default, rename = "simpleAbsoluteReturn", deserialize_with = "number")]
+    #[serde(default, rename = "simpleAbsoluteReturn", deserialize_with = "decimal")]
     pub simple_absolute_return: Option<f64>,
 }
 
@@ -90,19 +105,19 @@ pub struct SecurityHolding {
     pub isin: Option<String>,
     pub name: Option<String>,
     pub security_type: Option<String>,
-    #[serde(default, deserialize_with = "number")]
+    #[serde(default, deserialize_with = "decimal")]
     pub quantity: Option<f64>,
-    #[serde(default, deserialize_with = "number")]
+    #[serde(default, deserialize_with = "decimal")]
     pub pending_quantity: Option<f64>,
-    #[serde(default, deserialize_with = "number")]
+    #[serde(default, deserialize_with = "decimal")]
     pub blocked_quantity: Option<f64>,
-    #[serde(default, deserialize_with = "number")]
+    #[serde(default, deserialize_with = "decimal")]
     pub fifo_price: Option<f64>,
-    #[serde(default, deserialize_with = "number")]
+    #[serde(default, deserialize_with = "decimal")]
     pub valuation: Option<f64>,
     pub valuation_currency: Option<String>,
     pub quote_venue: Option<String>,
-    #[serde(default, deserialize_with = "number")]
+    #[serde(default, deserialize_with = "decimal")]
     pub quote_mid_price: Option<f64>,
     pub quote_currency: Option<String>,
     pub quote_timestamp_utc: Option<String>,
@@ -120,11 +135,11 @@ pub struct CryptoHolding {
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct CryptoPosition {
-    #[serde(default, deserialize_with = "number")]
+    #[serde(default, deserialize_with = "decimal")]
     pub filled: Option<f64>,
-    #[serde(default, deserialize_with = "number")]
+    #[serde(default, deserialize_with = "decimal")]
     pub sellable: Option<f64>,
-    #[serde(default, deserialize_with = "number")]
+    #[serde(default, deserialize_with = "decimal")]
     pub pending: Option<f64>,
 }
 
@@ -137,11 +152,11 @@ pub struct EtpPosition {
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Position {
-    #[serde(default, deserialize_with = "number")]
+    #[serde(default, deserialize_with = "decimal")]
     pub blocked: Option<f64>,
-    #[serde(default, deserialize_with = "number")]
+    #[serde(default, deserialize_with = "decimal")]
     pub filled: Option<f64>,
-    #[serde(default, deserialize_with = "number")]
+    #[serde(default, deserialize_with = "decimal")]
     pub pending: Option<f64>,
 }
 
@@ -155,11 +170,11 @@ pub struct Quote {
     pub security_type: Option<String>,
     pub quote_tick_id: Option<String>,
     pub quote_venue: Option<String>,
-    #[serde(default, deserialize_with = "number")]
+    #[serde(default, deserialize_with = "decimal")]
     pub quote_mid_price: Option<f64>,
-    #[serde(default, deserialize_with = "number")]
+    #[serde(default, deserialize_with = "decimal")]
     pub quote_bid_price: Option<f64>,
-    #[serde(default, deserialize_with = "number")]
+    #[serde(default, deserialize_with = "decimal")]
     pub quote_ask_price: Option<f64>,
     pub quote_currency: Option<String>,
     pub quote_timestamp_utc: Option<String>,
@@ -171,14 +186,16 @@ pub struct Quote {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct QuotePerformance {
     pub timeframe: Timeframe,
-    #[serde(default, deserialize_with = "number")]
+    #[serde(default, deserialize_with = "decimal")]
     pub performance: Option<f64>,
-    #[serde(default, deserialize_with = "number")]
+    #[serde(default, deserialize_with = "decimal")]
     pub simple_absolute_return: Option<f64>,
 }
 
-/// Accepts JSON numbers and decimal strings.
-fn number<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<f64>, D::Error> {
+/// Deserializes a JSON number, a decimal string (the API sends some decimals
+/// as strings) or null. For your own types, e.g. for `Client::query_as`:
+/// `#[serde(default, deserialize_with = "scalable_embed::decimal")]`.
+pub fn decimal<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<f64>, D::Error> {
     #[derive(Deserialize)]
     #[serde(untagged)]
     enum Raw {
@@ -258,8 +275,8 @@ mod tests {
                 account_id: "acc-1".to_string(),
                 portfolio_id: "port-1".to_string(),
                 resolution: Resolution {
-                    account: "selected_context".to_string(),
-                    portfolio: "explicit".to_string(),
+                    account: IdSource::SelectedContext,
+                    portfolio: IdSource::Explicit,
                 },
                 result: Overview {
                     valuation: Valuation {

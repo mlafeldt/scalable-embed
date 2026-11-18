@@ -9,42 +9,10 @@
 //! ~/.config/scalable-embed-example, next to the CLI's ~/.config/scalable-cli.
 //! Pass `--file-session` first to store the session in that folder as well.
 
-use std::thread;
-use std::time::Duration;
+use std::ops::ControlFlow;
 
 use anyhow::{Context, Result};
-use scalable_embed::{
-    Client, DeviceCodePrompt, LoginProgressSink, Options, SessionBackendPreference,
-};
-
-struct Progress;
-
-impl LoginProgressSink for Progress {
-    fn note_browser_confirmation_pending(&mut self, polls: u64) -> Result<()> {
-        eprintln!("waiting for browser confirmation (poll {polls})");
-        Ok(())
-    }
-    fn note_browser_confirmation_slow_down(&mut self, secs: u64) -> Result<()> {
-        eprintln!("slowing down, polling every {secs}s");
-        Ok(())
-    }
-    fn wait_for_browser_confirmation(&mut self, d: Duration) -> Result<()> {
-        thread::sleep(d);
-        Ok(())
-    }
-    fn note_second_factor_wait(&mut self) -> Result<()> {
-        eprintln!("approve the 2FA request in the Scalable app");
-        Ok(())
-    }
-    fn wait_for_second_factor(&mut self, d: Duration) -> Result<()> {
-        thread::sleep(d);
-        Ok(())
-    }
-    fn finish(&mut self) -> Result<()> {
-        eprintln!("login finished");
-        Ok(())
-    }
-}
+use scalable_embed::{Client, LoginEvent, Options, SessionBackendPreference};
 
 fn main() -> Result<()> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
@@ -67,22 +35,35 @@ fn main() -> Result<()> {
     let mut client = Client::new(options)?;
 
     if command.first().is_some_and(|c| c == "login") {
-        let ctx = client.login(
-            |p: &DeviceCodePrompt| {
-                let url = p
-                    .verification_uri_complete
-                    .as_ref()
-                    .unwrap_or(&p.verification_uri);
-                eprintln!("code {} — confirm at {url}", p.user_code);
-                let _ = std::process::Command::new("open").arg(url).status();
-                Ok(())
-            },
-            &mut Progress,
-        )?;
-        eprintln!(
-            "account {}, portfolio {:?}",
-            ctx.account_id, ctx.portfolio_id
-        );
+        // Events repeat while waiting; print each one once.
+        let mut last = None;
+        let context = client.login(|event| {
+            if last.as_ref() != Some(&event) {
+                match &event {
+                    LoginEvent::DeviceCode(prompt) => {
+                        eprintln!("code {} — confirm at {}", prompt.user_code, prompt.url());
+                        let _ = std::process::Command::new("open")
+                            .arg(prompt.url())
+                            .status();
+                    }
+                    LoginEvent::WaitingForBrowser => {
+                        eprintln!("waiting for confirmation in the browser")
+                    }
+                    LoginEvent::WaitingForSecondFactor => {
+                        eprintln!("approve the login on your linked device")
+                    }
+                }
+                last = Some(event);
+            }
+            ControlFlow::Continue(())
+        })?;
+        match context {
+            Some(ctx) => eprintln!(
+                "account {}, portfolio {:?}",
+                ctx.account_id, ctx.portfolio_id
+            ),
+            None => eprintln!("logged in, but saving the default account and portfolio failed"),
+        }
         return Ok(());
     }
 

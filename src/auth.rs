@@ -227,7 +227,7 @@ impl LoginProgressStage {
 }
 
 /// Device-code prompt for embedders that render login UI themselves.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceCodePrompt {
     pub user_code: String,
     pub verification_uri: String,
@@ -235,7 +235,7 @@ pub struct DeviceCodePrompt {
     pub expires_in: i64,
 }
 
-pub trait LoginProgressSink {
+pub(crate) trait LoginProgressSink {
     fn note_browser_confirmation_pending(&mut self, pending_polls: u64) -> Result<()>;
     fn note_browser_confirmation_slow_down(&mut self, interval_secs: u64) -> Result<()>;
     fn wait_for_browser_confirmation(&mut self, duration: Duration) -> Result<()>;
@@ -525,7 +525,7 @@ pub(crate) fn login_with_device_code_events(
     env_cfg: &EnvConfig,
     session_mode: Option<SessionMode>,
     dpop_options: &DpopRuntimeOptions,
-    mut on_device_code: impl FnMut(&DeviceCodePrompt) -> Result<()>,
+    on_device_code: impl FnOnce(&DeviceCodePrompt) -> Result<()>,
     progress: &mut impl LoginProgressSink,
 ) -> Result<SecretWriteBackend> {
     login_with_device_code_inner(
@@ -552,7 +552,7 @@ fn login_with_device_code_inner(
     env_cfg: &EnvConfig,
     session_mode: Option<SessionMode>,
     dpop_options: &DpopRuntimeOptions,
-    mut on_device_code: impl FnMut(&DeviceCodeResponse) -> Result<()>,
+    on_device_code: impl FnOnce(&DeviceCodeResponse) -> Result<()>,
     progress: &mut impl LoginProgressSink,
 ) -> Result<SecretWriteBackend> {
     validate_env_transport_security(env_cfg)?;
