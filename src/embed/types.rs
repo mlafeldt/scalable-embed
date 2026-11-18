@@ -145,6 +145,38 @@ pub struct Position {
     pub pending: Option<f64>,
 }
 
+/// `sc broker quote`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Quote {
+    pub requested_quote_source: Option<String>,
+    pub security_id: Option<String>,
+    pub isin: String,
+    pub name: Option<String>,
+    pub security_type: Option<String>,
+    pub quote_tick_id: Option<String>,
+    pub quote_venue: Option<String>,
+    #[serde(default, deserialize_with = "number")]
+    pub quote_mid_price: Option<f64>,
+    #[serde(default, deserialize_with = "number")]
+    pub quote_bid_price: Option<f64>,
+    #[serde(default, deserialize_with = "number")]
+    pub quote_ask_price: Option<f64>,
+    pub quote_currency: Option<String>,
+    pub quote_timestamp_utc: Option<String>,
+    pub quote_is_outdated: Option<bool>,
+    pub quote_performance_date: Option<String>,
+    pub quote_performances: Vec<QuotePerformance>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct QuotePerformance {
+    pub timeframe: Timeframe,
+    #[serde(default, deserialize_with = "number")]
+    pub performance: Option<f64>,
+    #[serde(default, deserialize_with = "number")]
+    pub simple_absolute_return: Option<f64>,
+}
+
 /// Accepts JSON numbers and decimal strings.
 fn number<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<f64>, D::Error> {
     #[derive(Deserialize)]
@@ -167,6 +199,7 @@ mod tests {
     use super::*;
     use crate::broker_projections::{
         project_broker_holdings_response, project_broker_overview_response,
+        project_broker_quote_response,
     };
     use crate::broker_queries::BrokerInput;
     use crate::broker_shared::{ResolvedBrokerIds, broker_result_envelope};
@@ -194,6 +227,13 @@ mod tests {
 
     fn holdings_output(graphql_response: Value) -> Value {
         output(project_broker_holdings_response, graphql_response)
+    }
+
+    fn quote_output(graphql_response: Value) -> Value {
+        output(
+            |input, response| project_broker_quote_response(input, "IE00B4L5Y983", response),
+            graphql_response,
+        )
     }
 
     #[test]
@@ -363,5 +403,81 @@ mod tests {
         assert_eq!(holding.valuation, None);
         assert_eq!(holding.quote_timestamp_utc, None);
         assert!(parsed.result.crypto_items.is_empty());
+    }
+
+    #[test]
+    fn quote_types_match_upstream_projection() {
+        let output = quote_output(json!({"account": {"brokerPortfolio": {"security": {
+            "id": "security-1",
+            "isin": "IE00B4L5Y983",
+            "name": "iShares Core MSCI World",
+            "type": "ETF",
+            "quoteTick": {
+                "venue": "MUNC",
+                "id": "tick-1",
+                "midPrice": 98.76,
+                "bidPrice": "98.70",
+                "askPrice": 98.82,
+                "currency": "EUR",
+                "timestampUtc": {"time": "2026-03-04T10:15:30Z"},
+                "isOutdated": false,
+                "performanceDate": {"date": "2026-03-04"},
+                "performancesByTimeframe": [
+                    {"timeframe": "SINCE_BUY", "performance": 0.2331, "simpleAbsoluteReturn": 18.66},
+                    {"timeframe": "INTRADAY", "performance": "-0.0045", "simpleAbsoluteReturn": -0.45}
+                ]
+            }
+        }}}}));
+
+        let parsed: BrokerResult<Quote> = serde_json::from_value(output).expect("typed");
+
+        assert_eq!(
+            parsed.result,
+            Quote {
+                requested_quote_source: Some("CONSOLIDATED".to_string()),
+                security_id: Some("security-1".to_string()),
+                isin: "IE00B4L5Y983".to_string(),
+                name: Some("iShares Core MSCI World".to_string()),
+                security_type: Some("ETF".to_string()),
+                quote_tick_id: Some("tick-1".to_string()),
+                quote_venue: Some("MUNC".to_string()),
+                quote_mid_price: Some(98.76),
+                quote_bid_price: Some(98.70),
+                quote_ask_price: Some(98.82),
+                quote_currency: Some("EUR".to_string()),
+                quote_timestamp_utc: Some("2026-03-04T10:15:30Z".to_string()),
+                quote_is_outdated: Some(false),
+                quote_performance_date: Some("2026-03-04".to_string()),
+                quote_performances: vec![
+                    QuotePerformance {
+                        timeframe: Timeframe::Intraday,
+                        performance: Some(-0.0045),
+                        simple_absolute_return: Some(-0.45),
+                    },
+                    QuotePerformance {
+                        timeframe: Timeframe::SinceBuy,
+                        performance: Some(0.2331),
+                        simple_absolute_return: Some(18.66),
+                    },
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn quote_tolerates_missing_values() {
+        let output = quote_output(json!({"account": {"brokerPortfolio": {"security": {
+            "isin": "IE00B4L5Y983",
+            "quoteTick": {"performancesByTimeframe": [{"timeframe": "TEN_YEARS"}]}
+        }}}}));
+
+        let parsed: BrokerResult<Quote> = serde_json::from_value(output).expect("typed");
+
+        let quote = parsed.result;
+        assert_eq!(quote.name, None);
+        assert_eq!(quote.quote_mid_price, None);
+        assert_eq!(quote.quote_performance_date, None);
+        assert_eq!(quote.quote_performances[0].timeframe, Timeframe::Unknown);
+        assert_eq!(quote.quote_performances[0].performance, None);
     }
 }

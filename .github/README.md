@@ -53,9 +53,9 @@ cargo run --example terminal -- overview
 cargo run --example terminal -- logout
 ```
 
-Typed results (`src/embed/types.rs`) exist for `broker overview` and `broker
-holdings` so far; every other command is available through `run` (raw JSON) or
-`run_as::<T>` with your own serde type. The typed structs ignore unknown fields
+Typed results (`src/embed/types.rs`) exist for `broker overview`, `broker
+holdings` and `broker quote` so far; every other command is available through
+`run` (raw JSON) or `run_as::<T>` with your own serde type. The typed structs ignore unknown fields
 and treat values as optional, and their tests run upstream's real projection
 code, so an upstream format change fails `cargo test` after merging an upstream
 release.
