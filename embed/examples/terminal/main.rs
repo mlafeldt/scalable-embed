@@ -136,6 +136,14 @@ impl App {
         self.pending > 0
     }
 
+    fn can_login(&self) -> bool {
+        !self.busy() && matches!(self.session, Session::LoggedOut)
+    }
+
+    fn can_logout(&self) -> bool {
+        !self.busy() && matches!(self.session, Session::LoggedIn(_))
+    }
+
     // -----------------------------------------------------------------------
     // Keys and worker replies.
 
@@ -164,10 +172,10 @@ impl App {
         match key.code {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('r') => self.refresh(),
-            KeyCode::Char('l') if !self.busy() && matches!(self.session, Session::LoggedOut) => {
+            KeyCode::Char('l') if self.can_login() => {
                 self.start_login();
             }
-            KeyCode::Char('o') if !self.busy() && matches!(self.session, Session::LoggedIn(_)) => {
+            KeyCode::Char('o') if self.can_logout() => {
                 self.send(Request::Logout);
             }
             KeyCode::Tab => self.timeframe = (self.timeframe + 1) % TIMEFRAMES.len(),
@@ -207,20 +215,16 @@ impl App {
                     login.update(event);
                 }
             }
-            Reply::LoginDone(result) => {
+            Reply::LoginDone(Ok(())) => {
+                // Cancellation may arrive after the session has been saved.
+                self.session = Session::LoggedIn(None);
+                self.refresh();
+            }
+            Reply::LoginDone(Err(err)) => {
                 // A cancelled login's dialog is gone already.
-                if !matches!(self.session, Session::LoggingIn(_)) {
-                    return;
-                }
-                match result {
-                    Ok(()) => {
-                        self.session = Session::LoggedIn(None);
-                        self.refresh();
-                    }
-                    Err(err) => {
-                        self.session = Session::LoggedOut;
-                        self.status = format!("Login failed: {err}");
-                    }
+                if matches!(self.session, Session::LoggingIn(_)) {
+                    self.session = Session::LoggedOut;
+                    self.status = format!("Login failed: {err}");
                 }
             }
             Reply::LoggedOut(Ok(())) => {
@@ -333,16 +337,8 @@ impl App {
     fn key_hints(&self) -> Line<'_> {
         let hints = [
             ("r", "Refresh", !self.busy()),
-            (
-                "l",
-                "Log In",
-                !self.busy() && matches!(self.session, Session::LoggedOut),
-            ),
-            (
-                "o",
-                "Log Out",
-                !self.busy() && matches!(self.session, Session::LoggedIn(_)),
-            ),
+            ("l", "Log In", self.can_login()),
+            ("o", "Log Out", self.can_logout()),
             ("Tab", "Timeframe", true),
             ("q", "Quit", true),
         ];
@@ -559,6 +555,31 @@ mod tests {
         app.handle(Reply::LoginDone(Ok(())));
         assert!(matches!(app.session, Session::LoggedIn(None)));
         assert!(matches!(worker_requests.try_recv(), Ok(Request::Refresh)));
+    }
+
+    #[test]
+    fn completed_login_is_shown_even_if_escape_closes_the_dialog() {
+        for escape_first in [true, false] {
+            let (requests, worker_requests) = mpsc::channel();
+            let (_, replies) = mpsc::channel();
+            let mut app = App::new(requests, replies);
+            app.session = Session::LoggedOut;
+            app.on_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+            assert!(matches!(worker_requests.try_recv(), Ok(Request::Login(_))));
+            let escape = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+
+            if escape_first {
+                app.on_key(escape);
+            }
+            app.handle(Reply::LoginDone(Ok(())));
+            if !escape_first {
+                app.on_key(escape);
+            }
+
+            assert!(matches!(app.session, Session::LoggedIn(None)));
+            assert_eq!(app.status, "Refreshing...");
+            assert!(matches!(worker_requests.try_recv(), Ok(Request::Refresh)));
+        }
     }
 
     #[test]

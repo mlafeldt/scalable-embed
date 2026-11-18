@@ -136,10 +136,12 @@ impl Client {
         })
     }
 
-    /// Device-code login. `on_event` gets the code to show (and typically
-    /// open in the browser), then each new wait. Setting `cancel` cancels the
-    /// login within about 100 ms of a wait, or after the request in flight;
-    /// it then fails with code `login_cancelled`.
+    /// Device-code login. `on_event` first receives [`LoginEvent::DeviceCode`]
+    /// with the code to show and the browser URL. If linked-device approval is
+    /// required, it then receives [`LoginEvent::WaitingForSecondFactor`] once.
+    /// During waits, `cancel` is checked about every 100 ms. Requests in flight
+    /// finish first. If cancellation is observed, the call fails with code
+    /// `login_cancelled`; if login completes first, it succeeds.
     ///
     /// Like `sc login`, it then saves and returns the default account and
     /// portfolio. If that fails, the login still succeeds with `None`, and
@@ -158,7 +160,7 @@ impl Client {
             second_factor_sent: false,
             cancelled: false,
         };
-        let result = crate::auth::login_with_device_code_inner(
+        let result = crate::auth::login_with_device_code_with_hooks(
             &mut self.session_manager,
             env,
             &env_cfg,

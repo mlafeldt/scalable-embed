@@ -498,7 +498,7 @@ pub fn login_with_device_code(
         io::stdout(),
         should_use_interactive_login_status(io::stdout().is_terminal()),
     );
-    login_with_device_code_inner(
+    login_with_device_code_with_hooks(
         session_manager,
         env,
         env_cfg,
@@ -509,7 +509,7 @@ pub fn login_with_device_code(
     )
 }
 
-pub(crate) fn login_with_device_code_inner<P: LoginProgressSink>(
+pub(crate) fn login_with_device_code_with_hooks<P: LoginProgressSink>(
     session_manager: &mut SessionManager,
     env: TargetEnv,
     env_cfg: &EnvConfig,

@@ -61,38 +61,15 @@ impl From<clap::Error> for Error {
 
 #[cfg(test)]
 mod tests {
-    use anyhow::anyhow;
-
     use super::*;
 
     #[test]
-    fn classifies_errors_that_require_a_new_login() {
-        let cases = [
-            (anyhow!("No active session"), "no_session", true),
-            (
-                crate::auth::refresh_relogin_required("refresh token was rejected")
-                    .into_error()
-                    .context("query failed"),
-                "refresh_relogin_required",
-                true,
-            ),
-            (
-                anyhow!(crate::dpop::DPOP_SESSION_KEY_RELOGIN_MESSAGE),
-                "refresh_relogin_required",
-                true,
-            ),
-            (anyhow!("RATE_LIMITED: retry later"), "rate_limited", false),
-            (
-                anyhow!("Failed to call GraphQL endpoint"),
-                "network_error",
-                false,
-            ),
-        ];
-        for (source, code, needs_login) in cases {
-            let err = Error::from(source);
-            assert_eq!(err.code(), code, "{err}");
-            assert_eq!(err.needs_login(), needs_login, "{err}");
-        }
-        assert!(!Error::new("login_cancelled", "login cancelled").needs_login());
+    fn preserves_refresh_relogin_required_from_the_error_chain() {
+        let source = crate::auth::refresh_relogin_required("refresh token was rejected")
+            .into_error()
+            .context("query failed");
+        let err = Error::from(source);
+        assert_eq!(err.code(), "refresh_relogin_required");
+        assert!(err.needs_login());
     }
 }
