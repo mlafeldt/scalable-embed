@@ -1,0 +1,101 @@
+# scalable-embed
+
+Unofficial Rust library for Scalable Capital, for use in other apps such as a
+desktop app. It is a fork of [Scalable CLI](https://github.com/ScalableCapital/scalable-cli)
+and is not affiliated with or supported by Scalable Capital. For the official
+CLI, use the upstream releases.
+
+The fork adds an embedding API that runs CLI commands in-process. Commands
+return the same JSON `data` that `sc <command> --json` prints and keep the
+CLI's behavior, including the two-step trade and savings-plan confirmation
+flows.
+
+## Security
+
+Out of the box, this library is less secure than the official CLI. On macOS,
+the official CLI keeps the key that signs every API request in the Secure
+Enclave, where it cannot be copied off the device. This library stores that key
+by default as a file readable only by your user account, in the app's
+`config_dir`. The session token goes to the OS keychain, as with the official
+CLI. Anything running as your user that can read both can use your Scalable
+session.
+
+To use the Secure Enclave instead, set
+`options.config.auth.signing_key_backend = DpopKeyBackend::SecureEnclave`. It
+fails in unsigned builds with OSStatus -34018 (missing keychain entitlement). An
+app signed with keychain entitlements should work, but this is untested.
+
+## Usage
+
+```toml
+[dependencies]
+scalable-embed = { git = "https://github.com/mlafeldt/scalable-embed" }
+```
+
+```rust
+use scalable_embed::{Client, Options};
+
+let mut client = Client::new(Options::new(app_config_dir, "com.example.myapp"))?;
+if !client.is_logged_in()? {
+    client.login(|prompt| show_code_and_open_browser(prompt), &mut my_progress_ui)?;
+}
+let overview = client.broker_overview(None, false)?;     // typed
+println!("{:?}", overview.result.valuation.total);
+let holdings = client.run(["broker", "holdings"])?;      // any sc command, raw JSON
+```
+
+`examples/embed.rs` is a complete program:
+
+```bash
+cargo run --example embed -- login
+cargo run --example embed -- overview
+cargo run --example embed -- logout
+```
+
+Typed results (`src/embed/types.rs`) exist for `broker overview` so far; every
+other command is available through `run` (raw JSON) or `run_as::<T>` with your
+own serde type. The typed structs ignore unknown fields and treat values as
+optional, and their tests run upstream's real projection code, so an upstream
+format change fails `cargo test` after merging an upstream release.
+
+- Use an app-specific `config_dir` and `keyring_service` so the app and the
+  `sc` CLI never overwrite each other's session.
+- Calls block; run them on a blocking thread in async UIs.
+- The library authenticates as the official CLI (same OAuth client and API
+  endpoint). Scalable can change or restrict these at any time.
+
+## Layout
+
+The repository is upstream's code plus a few additions. The root package keeps
+upstream's name, `scalable-cli`, so merging upstream releases doesn't conflict
+in `Cargo.toml` or `Cargo.lock`. The `scalable-embed` crate in `embed/`
+re-exports its `embed` module under the library's own name.
+
+New code lives in `src/embed.rs`, `src/embed/`, `embed/`, `examples/embed.rs`,
+`tests/embed.rs` and this README, which GitHub shows instead of upstream's
+`README.md`. Changes to upstream files are limited to these hooks:
+
+| File | Change |
+| --- | --- |
+| `Cargo.toml` | `channel-prod` is a default feature (the public repo has no `build.rs` for the dev channel) |
+| `src/lib.rs` | declares `pub mod embed` |
+| `src/auth.rs` | device-code login split so the prompt and progress can go to caller hooks; `DeviceCodePrompt` and `LoginProgressSink` are public |
+| `src/config.rs` | config dir honors the embedder's override |
+| `src/session.rs` | keyring service honors the embedder's override |
+
+Keep it that way: change upstream files only in these hooks, add no
+dependencies (keeps `Cargo.lock` conflict-free), and don't reformat upstream
+code.
+
+## Syncing with upstream
+
+`main` is upstream's releases plus the fork's commits. Upstream publishes one
+squashed commit per release, tagged `vX.Y.Z`; each sync merges that tag into
+`main`. Merging rather than rebasing keeps fork commits stable for anyone who
+depends on them.
+
+```bash
+git fetch upstream --tags
+git merge vX.Y.Z
+cargo test
+```
