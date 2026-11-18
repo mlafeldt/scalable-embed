@@ -14,21 +14,6 @@ flows.
 
 *The [desktop example](#usage) with made-up data.*
 
-## Security
-
-Out of the box, this library is less secure than the official CLI. On macOS,
-the official CLI keeps the key that signs every API request in the Secure
-Enclave, where it cannot be copied off the device. This library stores that key
-by default as a file readable only by your user account, in the app's
-`config_dir`. The session token goes to the OS keychain, as with the official
-CLI. Anything running as your user that can read both can use your Scalable
-session.
-
-To use the Secure Enclave instead, set
-`options.config.auth.signing_key_backend = DpopKeyBackend::SecureEnclave`. It
-fails in unsigned builds with OSStatus -34018 (missing keychain entitlement). An
-app signed with keychain entitlements should work, but this is untested.
-
 ## Usage
 
 ```toml
@@ -96,6 +81,21 @@ without a failing test.
   developing to avoid that.
 - The library authenticates as the official CLI (same OAuth client and API
   endpoint). Scalable can change or restrict these at any time.
+
+## Security
+
+Out of the box, this library is less secure than the official CLI. On macOS,
+the official CLI keeps the key that signs every API request in the Secure
+Enclave, where it cannot be copied off the device. This library stores that key
+by default as a file readable only by your user account, in the app's
+`config_dir`. The session token goes to the OS keychain, as with the official
+CLI. Anything running as your user that can read both can use your Scalable
+session.
+
+To use the Secure Enclave instead, set
+`options.config.auth.signing_key_backend = DpopKeyBackend::SecureEnclave`. It
+fails in unsigned builds with OSStatus -34018 (missing keychain entitlement). An
+app signed with keychain entitlements should work, but this is untested.
 
 ## Layout
 
