@@ -6,11 +6,10 @@
 //! All calls block. In async UIs, run them on a blocking thread
 //! (e.g. `tokio::task::spawn_blocking`) and guard the `Client` with a mutex.
 
-use std::cell::{Cell, RefCell};
 use std::ffi::OsString;
-use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
@@ -32,7 +31,9 @@ pub use crate::config::{
     AppConfig, DpopKeyBackend, Pkcs11Config, RuntimeAuthConfig, SessionBackendPreference,
     TradeControlsConfig,
 };
-use crate::session::SessionManager;
+use crate::config::{EnvConfig, TargetEnv};
+use crate::dpop::DpopRuntimeOptions;
+use crate::session::{Session, SessionManager};
 
 /// Config dir and keyring service, set by the first `Client::new`.
 static STORAGE: OnceLock<(PathBuf, String)> = OnceLock::new();
@@ -103,25 +104,27 @@ impl Client {
         })
     }
 
-    /// Device-code login. `on_event` first gets the code to show (and
-    /// typically open in the browser), then the current wait about every
-    /// 100 ms until the login ends. Return `ControlFlow::Break(())` to cancel
-    /// the login, which then fails with code `login_cancelled`; a request
-    /// already sent finishes first.
+    /// Device-code login. `on_event` gets the code to show (and typically
+    /// open in the browser), then each new wait. Setting `cancel` cancels the
+    /// login within about 100 ms of a wait, or after the request in flight;
+    /// it then fails with code [`Error::LOGIN_CANCELLED`].
     ///
     /// Like `sc login`, it then saves and returns the default account and
     /// portfolio. If that fails, the login still succeeds with `None`, and
     /// commands look them up on each call.
     pub fn login(
         &mut self,
-        on_event: impl FnMut(LoginEvent) -> ControlFlow<()>,
+        cancel: &AtomicBool,
+        on_event: impl FnMut(LoginEvent),
     ) -> Result<Option<BrokerContext>> {
         let env = crate::channel::current_env();
         let env_cfg = crate::channel::current_env_config();
         let dpop_options = crate::channel::current_dpop_runtime_options(&self.config);
-        let events = LoginEvents {
-            on_event: RefCell::new(on_event),
-            cancelled: Cell::new(false),
+        let mut events = LoginEvents {
+            on_event,
+            cancel,
+            last: None,
+            cancelled: false,
         };
         let result = crate::auth::login_with_device_code_events(
             &mut self.session_manager,
@@ -129,10 +132,13 @@ impl Client {
             &env_cfg,
             None,
             &dpop_options,
-            |prompt| events.send(LoginEvent::DeviceCode(prompt.clone())),
-            &mut &events,
+            |events, prompt| {
+                events.send(LoginEvent::DeviceCode(prompt.clone()));
+                Ok(())
+            },
+            &mut events,
         );
-        if events.cancelled.get() {
+        if events.cancelled {
             return Err(Error::new(Error::LOGIN_CANCELLED, "login cancelled"));
         }
         result?;
@@ -236,22 +242,13 @@ impl Client {
     /// of your own queries. With `portfolio_id: None`, the portfolio saved at
     /// login.
     pub fn broker_ids(&mut self, portfolio_id: Option<&str>) -> Result<BrokerIds> {
-        let dpop_options = crate::channel::current_dpop_runtime_options(&self.config);
-        let env = crate::resolve_active_env(&self.session_manager)?;
-        let env_cfg = crate::channel::current_env_config();
-        let mut session = crate::active_session::load_active_session(
-            &mut self.session_manager,
-            env,
-            &env_cfg,
-            &dpop_options,
-        )?
-        .session;
+        let mut active = self.active_session()?;
         let ids = crate::broker_shared::resolve_broker_ids(
             &mut self.session_manager,
-            env,
-            &env_cfg,
-            &mut session,
-            &dpop_options,
+            active.env,
+            &active.env_cfg,
+            &mut active.session,
+            &active.dpop_options,
             portfolio_id,
         )?;
         Ok(BrokerIds {
@@ -284,31 +281,22 @@ impl Client {
                 ));
             }
         };
-        let dpop_options = crate::channel::current_dpop_runtime_options(&self.config);
-        let env = crate::resolve_active_env(&self.session_manager)?;
-        let env_cfg = crate::channel::current_env_config();
-        let loaded = crate::active_session::load_active_session(
-            &mut self.session_manager,
-            env,
-            &env_cfg,
-            &dpop_options,
-        )?;
-        let mut session = loaded.session;
+        let mut active = self.active_session()?;
         Ok(crate::session_refresh::execute_with_refresh_retry(
             &mut self.session_manager,
-            env,
-            &env_cfg,
-            &mut session,
-            &dpop_options,
+            active.env,
+            &active.env_cfg,
+            &mut active.session,
+            &active.dpop_options,
             |token| {
                 crate::graphql::execute_graphql(
-                    &env_cfg.graphql_url,
+                    &active.env_cfg.graphql_url,
                     token,
                     query,
                     &variables,
                     Some(operation_name),
-                    loaded.access_context,
-                    &dpop_options,
+                    active.access_context,
+                    &active.dpop_options,
                 )
             },
         )?)
@@ -323,6 +311,26 @@ impl Client {
         variables: Value,
     ) -> Result<R> {
         parse(self.query(operation_name, query, variables)?)
+    }
+
+    /// Loads the session, refreshing it if needed, as commands do.
+    fn active_session(&mut self) -> Result<ActiveSession> {
+        let env = crate::resolve_active_env(&self.session_manager)?;
+        let env_cfg = crate::channel::current_env_config();
+        let dpop_options = crate::channel::current_dpop_runtime_options(&self.config);
+        let loaded = crate::active_session::load_active_session(
+            &mut self.session_manager,
+            env,
+            &env_cfg,
+            &dpop_options,
+        )?;
+        Ok(ActiveSession {
+            env,
+            env_cfg,
+            dpop_options,
+            session: loaded.session,
+            access_context: loaded.access_context,
+        })
     }
 
     fn broker<R: DeserializeOwned>(&mut self, command: crate::cli::BrokerCommand) -> Result<R> {
@@ -340,6 +348,14 @@ impl Client {
     }
 }
 
+struct ActiveSession {
+    env: TargetEnv,
+    env_cfg: EnvConfig,
+    dpop_options: DpopRuntimeOptions,
+    session: Session,
+    access_context: crate::graphql::GraphqlAccessContext,
+}
+
 /// The IDs most broker queries take as `$accountId` and `$portfolioId`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrokerIds {
@@ -350,7 +366,7 @@ pub struct BrokerIds {
 /// Login progress, for `Client::login`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoginEvent {
-    /// The code to show and confirm in the browser. Comes once, first.
+    /// The code to show and confirm in the browser. Comes first.
     DeviceCode(DeviceCodePrompt),
     /// Waiting for the user to confirm the code in the browser.
     WaitingForBrowser,
@@ -367,28 +383,34 @@ impl DeviceCodePrompt {
     }
 }
 
-/// Turns upstream's login progress hooks into `LoginEvent`s, and does their
-/// waiting in short steps, asking `on_event` each time whether to go on.
-struct LoginEvents<F> {
-    on_event: RefCell<F>,
-    cancelled: Cell<bool>,
+/// Turns upstream's login progress hooks into `LoginEvent`s, each sent once,
+/// and does their waiting in short steps so `cancel` takes effect quickly.
+struct LoginEvents<'a, F> {
+    on_event: F,
+    cancel: &'a AtomicBool,
+    last: Option<LoginEvent>,
+    /// Set when the login stopped for `cancel`, as upstream rewords 2FA errors.
+    cancelled: bool,
 }
 
-impl<F: FnMut(LoginEvent) -> ControlFlow<()>> LoginEvents<F> {
+impl<F: FnMut(LoginEvent)> LoginEvents<'_, F> {
     const STEP: Duration = Duration::from_millis(100);
 
-    fn send(&self, event: LoginEvent) -> anyhow::Result<()> {
-        if (self.on_event.borrow_mut())(event).is_break() {
-            self.cancelled.set(true);
-            anyhow::bail!("login cancelled");
+    fn send(&mut self, event: LoginEvent) {
+        if self.last.as_ref() != Some(&event) {
+            self.last = Some(event.clone());
+            (self.on_event)(event);
         }
-        Ok(())
     }
 
-    fn wait(&self, event: LoginEvent, duration: Duration) -> anyhow::Result<()> {
+    fn wait(&mut self, event: LoginEvent, duration: Duration) -> anyhow::Result<()> {
         let end = Instant::now() + duration;
         loop {
-            self.send(event.clone())?;
+            if self.cancel.load(Ordering::Relaxed) {
+                self.cancelled = true;
+                anyhow::bail!("login cancelled");
+            }
+            self.send(event.clone());
             let left = end.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 return Ok(());
@@ -398,7 +420,7 @@ impl<F: FnMut(LoginEvent) -> ControlFlow<()>> LoginEvents<F> {
     }
 }
 
-impl<F: FnMut(LoginEvent) -> ControlFlow<()>> LoginProgressSink for &LoginEvents<F> {
+impl<F: FnMut(LoginEvent)> LoginProgressSink for LoginEvents<'_, F> {
     fn note_browser_confirmation_pending(&mut self, _pending_polls: u64) -> anyhow::Result<()> {
         Ok(())
     }

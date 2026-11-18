@@ -22,16 +22,16 @@ scalable-embed = { git = "https://github.com/mlafeldt/scalable-embed" }
 ```
 
 ```rust
-use std::ops::ControlFlow;
+use std::sync::atomic::AtomicBool;
 use scalable_embed::{Client, LoginEvent, Options};
 
 let mut client = Client::new(Options::new(app_config_dir, "com.example.myapp"))?;
 if !client.is_logged_in()? {
-    client.login(|event| {
-        if let LoginEvent::DeviceCode(prompt) = &event {
+    let cancel = AtomicBool::new(false);                   // set it to cancel
+    client.login(&cancel, |event| {
+        if let LoginEvent::DeviceCode(prompt) = event {
             show_code_and_open_browser(&prompt.user_code, prompt.url());
         }
-        if cancel_clicked() { ControlFlow::Break(()) } else { ControlFlow::Continue(()) }
     })?;
 }
 let overview = client.broker_overview(None, false)?;     // typed

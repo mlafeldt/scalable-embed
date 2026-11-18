@@ -101,7 +101,6 @@ pub struct Holdings {
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct SecurityHolding {
-    pub kind: String,
     pub isin: Option<String>,
     pub name: Option<String>,
     pub security_type: Option<String>,
@@ -126,7 +125,6 @@ pub struct SecurityHolding {
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct CryptoHolding {
-    pub kind: String,
     pub ticker: Option<String>,
     pub name: Option<String>,
     pub position: CryptoPosition,
@@ -360,7 +358,6 @@ mod tests {
                 security_count: Some(1),
                 crypto_count: Some(1),
                 items: vec![SecurityHolding {
-                    kind: "security".to_string(),
                     isin: Some("IE00B4L5Y983".to_string()),
                     name: Some("iShares Core MSCI World".to_string()),
                     security_type: Some("ETF".to_string()),
@@ -377,7 +374,6 @@ mod tests {
                     quote_is_outdated: Some(false),
                 }],
                 crypto_items: vec![CryptoHolding {
-                    kind: "crypto".to_string(),
                     ticker: Some("BTC".to_string()),
                     name: Some("Bitcoin".to_string()),
                     position: CryptoPosition {

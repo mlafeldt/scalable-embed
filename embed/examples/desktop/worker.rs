@@ -1,16 +1,12 @@
 //! Worker thread: owns the client and answers one request at a time.
 
-use std::ops::ControlFlow;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
 use anyhow::Context;
-use scalable_embed::{
-    Client, LoginEvent, Options, QuotePerformance, SessionBackendPreference, TimeframeReturn,
-    decimal,
-};
+use scalable_embed::{Client, LoginEvent, Options, SessionBackendPreference, Timeframe, decimal};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -88,25 +84,30 @@ pub fn spawn(file_session: bool) -> (Sender<Request>, Receiver<Reply>) {
 }
 
 fn run(requests: Receiver<Request>, replies: Sender<Reply>, file_session: bool) {
-    let mut client = match client(file_session) {
-        Ok(client) => client,
-        Err(err) => {
-            let _ = replies.send(Reply::Error(format!("{err:#}")));
-            return;
-        }
-    };
+    // Without a client, every request gets the reason, so each still ends.
+    let mut client = client(file_session).map_err(|err| format!("{err:#}"));
     for request in requests {
-        let reply = match request {
-            Request::Refresh => match snapshot(&mut client) {
+        let reply = match (&mut client, request) {
+            (Err(err), Request::Login { id, .. }) => Reply::LoginDone {
+                id,
+                result: Err(err.clone()),
+            },
+            (Err(err), Request::Refresh | Request::Logout) => Reply::Error(err.clone()),
+            (Ok(client), Request::Refresh) => match snapshot(client) {
                 Ok(snapshot) => Reply::Data(snapshot),
                 Err(err) if err.needs_login() => Reply::NeedsLogin,
                 Err(err) => Reply::Error(err.to_string()),
             },
-            Request::Login { id, cancel } => Reply::LoginDone {
+            (Ok(client), Request::Login { id, cancel }) => Reply::LoginDone {
                 id,
-                result: login(&mut client, id, &cancel, &replies),
+                result: client
+                    .login(&cancel, |event| {
+                        let _ = replies.send(Reply::Login { id, event });
+                    })
+                    .map(drop)
+                    .map_err(|err| err.to_string()),
             },
-            Request::Logout => {
+            (Ok(client), Request::Logout) => {
                 Reply::LoggedOut(client.logout().map(drop).map_err(|e| e.to_string()))
             }
         };
@@ -125,29 +126,6 @@ fn client(file_session: bool) -> anyhow::Result<Client> {
         options.config.auth.session_backend = SessionBackendPreference::File;
     }
     Ok(Client::new(options)?)
-}
-
-fn login(
-    client: &mut Client,
-    id: u64,
-    cancel: &AtomicBool,
-    replies: &Sender<Reply>,
-) -> Result<(), String> {
-    // Events repeat while waiting; pass each one on once.
-    let mut last = None;
-    client
-        .login(|event| {
-            if cancel.load(Ordering::Relaxed) {
-                return ControlFlow::Break(());
-            }
-            if last.as_ref() != Some(&event) {
-                last = Some(event.clone());
-                let _ = replies.send(Reply::Login { id, event });
-            }
-            ControlFlow::Continue(())
-        })
-        .map(drop)
-        .map_err(|err| err.to_string())
 }
 
 /// Everything the window shows, in one request: upstream's overview and
@@ -209,7 +187,15 @@ struct Valuation {
     #[serde(default, deserialize_with = "decimal")]
     valuation: Option<f64>,
     #[serde(default)]
-    time_weighted_return_by_timeframe: Option<Vec<TimeframeReturn>>,
+    time_weighted_return_by_timeframe: Option<Vec<Change>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Change {
+    timeframe: Timeframe,
+    #[serde(default, deserialize_with = "decimal")]
+    simple_absolute_return: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -238,7 +224,14 @@ struct QuoteTick {
     #[serde(default, deserialize_with = "decimal")]
     mid_price: Option<f64>,
     #[serde(default)]
-    performances_by_timeframe: Option<Vec<QuotePerformance>>,
+    performances_by_timeframe: Option<Vec<Performance>>,
+}
+
+#[derive(Deserialize)]
+struct Performance {
+    timeframe: Timeframe,
+    #[serde(default, deserialize_with = "decimal")]
+    performance: Option<f64>,
 }
 
 fn snapshot(client: &mut Client) -> scalable_embed::Result<Snapshot> {

@@ -513,20 +513,20 @@ pub fn login_with_device_code(
         env_cfg,
         session_mode,
         dpop_options,
-        |device| print_device_login_prompt(device, show_local_file_storage_warning),
+        |_, device| print_device_login_prompt(device, show_local_file_storage_warning),
         &mut progress,
     )
 }
 
 /// Like `login_with_device_code`, but the caller renders prompt and progress.
-pub(crate) fn login_with_device_code_events(
+pub(crate) fn login_with_device_code_events<P: LoginProgressSink>(
     session_manager: &mut SessionManager,
     env: TargetEnv,
     env_cfg: &EnvConfig,
     session_mode: Option<SessionMode>,
     dpop_options: &DpopRuntimeOptions,
-    on_device_code: impl FnOnce(&DeviceCodePrompt) -> Result<()>,
-    progress: &mut impl LoginProgressSink,
+    on_device_code: impl FnOnce(&mut P, &DeviceCodePrompt) -> Result<()>,
+    progress: &mut P,
 ) -> Result<SecretWriteBackend> {
     login_with_device_code_inner(
         session_manager,
@@ -534,33 +534,36 @@ pub(crate) fn login_with_device_code_events(
         env_cfg,
         session_mode,
         dpop_options,
-        |device| {
-            on_device_code(&DeviceCodePrompt {
-                user_code: device.user_code.clone(),
-                verification_uri: device.verification_uri.clone(),
-                verification_uri_complete: device.verification_uri_complete.clone(),
-                expires_in: device.expires_in,
-            })
+        |progress, device| {
+            on_device_code(
+                progress,
+                &DeviceCodePrompt {
+                    user_code: device.user_code.clone(),
+                    verification_uri: device.verification_uri.clone(),
+                    verification_uri_complete: device.verification_uri_complete.clone(),
+                    expires_in: device.expires_in,
+                },
+            )
         },
         progress,
     )
 }
 
-fn login_with_device_code_inner(
+fn login_with_device_code_inner<P: LoginProgressSink>(
     session_manager: &mut SessionManager,
     env: TargetEnv,
     env_cfg: &EnvConfig,
     session_mode: Option<SessionMode>,
     dpop_options: &DpopRuntimeOptions,
-    on_device_code: impl FnOnce(&DeviceCodeResponse) -> Result<()>,
-    progress: &mut impl LoginProgressSink,
+    on_device_code: impl FnOnce(&mut P, &DeviceCodeResponse) -> Result<()>,
+    progress: &mut P,
 ) -> Result<SecretWriteBackend> {
     validate_env_transport_security(env_cfg)?;
     session_manager.validate_login_storage_ready()?;
     let client = build_blocking_client_https_only_with_timeout(RUNTIME_HTTP_TIMEOUT)?;
     let dpop = AuthDpopContext::from_runtime_options_for_login(dpop_options)?;
     let device = request_device_code(&client, env_cfg, &dpop)?;
-    on_device_code(&device)?;
+    on_device_code(&mut *progress, &device)?;
 
     let mut interval_secs = device.interval.unwrap_or(5).max(1);
     let expires_at = Instant::now() + Duration::from_secs(device.expires_in as u64);

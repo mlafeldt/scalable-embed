@@ -11,7 +11,8 @@ pub struct Error {
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 impl Error {
-    pub(crate) const LOGIN_CANCELLED: &str = "login_cancelled";
+    /// The code of a login stopped by its `cancel` flag.
+    pub const LOGIN_CANCELLED: &str = "login_cancelled";
 
     pub(crate) fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
@@ -26,7 +27,7 @@ impl Error {
 
     /// The code `sc --json` reports in `error.code`, such as `no_session`,
     /// `rate_limited`, `network_error` or `invalid_input`, or
-    /// `login_cancelled` after a cancelled [`Client::login`](super::Client::login).
+    /// [`Error::LOGIN_CANCELLED`].
     pub fn code(&self) -> &'static str {
         self.code
     }

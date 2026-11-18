@@ -9,7 +9,7 @@
 //! ~/.config/scalable-embed-example, next to the CLI's ~/.config/scalable-cli.
 //! Pass `--file-session` first to store the session in that folder as well.
 
-use std::ops::ControlFlow;
+use std::sync::atomic::AtomicBool;
 
 use anyhow::{Context, Result};
 use scalable_embed::{Client, LoginEvent, Options, SessionBackendPreference};
@@ -35,27 +35,18 @@ fn main() -> Result<()> {
     let mut client = Client::new(options)?;
 
     if command.first().is_some_and(|c| c == "login") {
-        // Events repeat while waiting; print each one once.
-        let mut last = None;
-        let context = client.login(|event| {
-            if last.as_ref() != Some(&event) {
-                match &event {
-                    LoginEvent::DeviceCode(prompt) => {
-                        eprintln!("code {} — confirm at {}", prompt.user_code, prompt.url());
-                        let _ = std::process::Command::new("open")
-                            .arg(prompt.url())
-                            .status();
-                    }
-                    LoginEvent::WaitingForBrowser => {
-                        eprintln!("waiting for confirmation in the browser")
-                    }
-                    LoginEvent::WaitingForSecondFactor => {
-                        eprintln!("approve the login on your linked device")
-                    }
-                }
-                last = Some(event);
+        let never = AtomicBool::new(false); // Ctrl+C ends it.
+        let context = client.login(&never, |event| match event {
+            LoginEvent::DeviceCode(prompt) => {
+                eprintln!("code {} — confirm at {}", prompt.user_code, prompt.url());
+                let _ = std::process::Command::new("open")
+                    .arg(prompt.url())
+                    .status();
             }
-            ControlFlow::Continue(())
+            LoginEvent::WaitingForBrowser => eprintln!("waiting for confirmation in the browser"),
+            LoginEvent::WaitingForSecondFactor => {
+                eprintln!("approve the login on your linked device")
+            }
         })?;
         match context {
             Some(ctx) => eprintln!(
