@@ -155,7 +155,7 @@ of upstream's `README.md`. Changes to upstream files are limited to these hooks:
 | --- | --- |
 | `Cargo.toml` | `channel-prod` is a default feature (the public repo has no `build.rs` for the dev channel) |
 | `src/lib.rs` | declares `pub mod embed` |
-| `src/auth.rs` | device-code login split so the prompt and progress can go to caller hooks; `DeviceCodePrompt` is public, `LoginProgressSink` crate-visible |
+| `src/auth.rs` | device-code login split with a prompt callback; response fields and progress sink crate-visible for the embedding adapter |
 | `src/config.rs` | config dir honors the embedder's override |
 | `src/session.rs` | keyring service honors the embedder's override |
 

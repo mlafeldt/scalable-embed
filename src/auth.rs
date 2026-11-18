@@ -95,13 +95,13 @@ impl RefreshExchangeError {
 }
 
 #[derive(Debug, Deserialize)]
-struct DeviceCodeResponse {
+pub(crate) struct DeviceCodeResponse {
     device_code: String,
-    user_code: String,
-    verification_uri: String,
+    pub(crate) user_code: String,
+    pub(crate) verification_uri: String,
     #[serde(default)]
-    verification_uri_complete: Option<String>,
-    expires_in: i64,
+    pub(crate) verification_uri_complete: Option<String>,
+    pub(crate) expires_in: i64,
     #[serde(default)]
     interval: Option<u64>,
 }
@@ -224,15 +224,6 @@ impl LoginProgressStage {
             Self::SecondFactorApproval => SECOND_FACTOR_WAIT_MESSAGE.to_string(),
         }
     }
-}
-
-/// Device-code prompt for embedders that render login UI themselves.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeviceCodePrompt {
-    pub user_code: String,
-    pub verification_uri: String,
-    pub verification_uri_complete: Option<String>,
-    pub expires_in: i64,
 }
 
 pub(crate) trait LoginProgressSink {
@@ -518,38 +509,7 @@ pub fn login_with_device_code(
     )
 }
 
-/// Like `login_with_device_code`, but the caller renders prompt and progress.
-pub(crate) fn login_with_device_code_events<P: LoginProgressSink>(
-    session_manager: &mut SessionManager,
-    env: TargetEnv,
-    env_cfg: &EnvConfig,
-    session_mode: Option<SessionMode>,
-    dpop_options: &DpopRuntimeOptions,
-    on_device_code: impl FnOnce(&mut P, &DeviceCodePrompt) -> Result<()>,
-    progress: &mut P,
-) -> Result<SecretWriteBackend> {
-    login_with_device_code_inner(
-        session_manager,
-        env,
-        env_cfg,
-        session_mode,
-        dpop_options,
-        |progress, device| {
-            on_device_code(
-                progress,
-                &DeviceCodePrompt {
-                    user_code: device.user_code.clone(),
-                    verification_uri: device.verification_uri.clone(),
-                    verification_uri_complete: device.verification_uri_complete.clone(),
-                    expires_in: device.expires_in,
-                },
-            )
-        },
-        progress,
-    )
-}
-
-fn login_with_device_code_inner<P: LoginProgressSink>(
+pub(crate) fn login_with_device_code_inner<P: LoginProgressSink>(
     session_manager: &mut SessionManager,
     env: TargetEnv,
     env_cfg: &EnvConfig,

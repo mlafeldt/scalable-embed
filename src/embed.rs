@@ -27,13 +27,12 @@ use serde_json::Value;
 
 mod document;
 mod error;
-mod types;
+mod query_helpers;
 
 pub use error::{Error, Result};
-pub use types::*;
+pub use query_helpers::{Timeframe, decimal};
 
-pub use crate::auth::DeviceCodePrompt;
-use crate::auth::LoginProgressSink;
+use crate::auth::{DeviceCodeResponse, LoginProgressSink};
 pub use crate::broker_context::BrokerContext;
 pub use crate::config::{
     AppConfig, DpopKeyBackend, Pkcs11Config, RuntimeAuthConfig, SessionBackendPreference,
@@ -115,7 +114,7 @@ impl Client {
     /// Device-code login. `on_event` gets the code to show (and typically
     /// open in the browser), then each new wait. Setting `cancel` cancels the
     /// login within about 100 ms of a wait, or after the request in flight;
-    /// it then fails with code [`Error::LOGIN_CANCELLED`].
+    /// it then fails with code `login_cancelled`.
     ///
     /// Like `sc login`, it then saves and returns the default account and
     /// portfolio. If that fails, the login still succeeds with `None`, and
@@ -131,23 +130,20 @@ impl Client {
         let mut events = LoginEvents {
             on_event,
             cancel,
-            last: None,
+            second_factor_sent: false,
             cancelled: false,
         };
-        let result = crate::auth::login_with_device_code_events(
+        let result = crate::auth::login_with_device_code_inner(
             &mut self.session_manager,
             env,
             &env_cfg,
             None,
             &dpop_options,
-            |events, prompt| {
-                events.send(LoginEvent::DeviceCode(prompt.clone()));
-                Ok(())
-            },
+            LoginEvents::show_device_code,
             &mut events,
         );
         if events.cancelled {
-            return Err(Error::new(Error::LOGIN_CANCELLED, "login cancelled"));
+            return Err(Error::new("login_cancelled", "login cancelled"));
         }
         result?;
         crate::cleanup_broker_context_best_effort();
@@ -163,8 +159,8 @@ impl Client {
     }
 
     /// Revokes tokens and deletes local session state, like `sc logout`.
-    pub fn logout(&mut self) -> Result<Value> {
-        self.run(["logout"])
+    pub fn logout(&mut self) -> Result<()> {
+        self.run(["logout"]).map(drop)
     }
 
     pub fn is_logged_in(&self) -> Result<bool> {
@@ -172,13 +168,16 @@ impl Client {
     }
 
     /// Runs any `sc` command except `login`, given its arguments without the
-    /// leading `sc`, e.g. `["broker", "quote", "--isin", "IE00B4L5Y983"]`, and
+    /// leading `sc`, e.g.
+    /// `["broker", "trade", "buy", "--isin", "IE00B4L5Y983", "--amount", "100"]`, and
     /// returns the `data` that `sc <command> --json` prints. The way to trade
     /// and make other changes; for reading, `query` fetches more per request.
+    /// The trade example only previews the order; repeating it with `--confirm`
+    /// and the ID from the preview submits it.
     pub fn run<I, T>(&mut self, args: I) -> Result<Value>
     where
         I: IntoIterator<Item = T>,
-        T: Into<OsString> + Clone,
+        T: Into<OsString>,
     {
         let argv = std::iter::once(OsString::from("sc")).chain(args.into_iter().map(Into::into));
         let crate::cli::Cli { command } = crate::cli::Cli::try_parse_from(argv)?;
@@ -195,7 +194,7 @@ impl Client {
     where
         R: DeserializeOwned,
         I: IntoIterator<Item = T>,
-        T: Into<OsString> + Clone,
+        T: Into<OsString>,
     {
         parse(self.run(args)?)
     }
@@ -311,15 +310,13 @@ pub struct BrokerIds {
     pub portfolio_id: String,
 }
 
-/// Login progress, for `Client::login`.
+/// The device-code prompt to display in your login UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LoginEvent {
-    /// The code to show and confirm in the browser. Comes first.
-    DeviceCode(DeviceCodePrompt),
-    /// Waiting for the user to confirm the code in the browser.
-    WaitingForBrowser,
-    /// Waiting for the user to approve the login on their linked device.
-    WaitingForSecondFactor,
+pub struct DeviceCodePrompt {
+    pub user_code: String,
+    pub verification_uri: String,
+    pub verification_uri_complete: Option<String>,
+    pub expires_in: i64,
 }
 
 impl DeviceCodePrompt {
@@ -331,12 +328,21 @@ impl DeviceCodePrompt {
     }
 }
 
+/// Login progress, for `Client::login`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoginEvent {
+    /// The code to show and confirm in the browser. Comes first.
+    DeviceCode(DeviceCodePrompt),
+    /// Waiting for the user to approve the login on their linked device.
+    WaitingForSecondFactor,
+}
+
 /// Turns upstream's login progress hooks into `LoginEvent`s, each sent once,
 /// and does their waiting in short steps so `cancel` takes effect quickly.
 struct LoginEvents<'a, F> {
     on_event: F,
     cancel: &'a AtomicBool,
-    last: Option<LoginEvent>,
+    second_factor_sent: bool,
     /// Set when the login stopped for `cancel`, as upstream rewords 2FA errors.
     cancelled: bool,
 }
@@ -344,21 +350,23 @@ struct LoginEvents<'a, F> {
 impl<F: FnMut(LoginEvent)> LoginEvents<'_, F> {
     const STEP: Duration = Duration::from_millis(100);
 
-    fn send(&mut self, event: LoginEvent) {
-        if self.last.as_ref() != Some(&event) {
-            self.last = Some(event.clone());
-            (self.on_event)(event);
-        }
+    fn show_device_code(&mut self, device: &DeviceCodeResponse) -> anyhow::Result<()> {
+        (self.on_event)(LoginEvent::DeviceCode(DeviceCodePrompt {
+            user_code: device.user_code.clone(),
+            verification_uri: device.verification_uri.clone(),
+            verification_uri_complete: device.verification_uri_complete.clone(),
+            expires_in: device.expires_in,
+        }));
+        Ok(())
     }
 
-    fn wait(&mut self, event: LoginEvent, duration: Duration) -> anyhow::Result<()> {
+    fn wait(&mut self, duration: Duration) -> anyhow::Result<()> {
         let end = Instant::now() + duration;
         loop {
             if self.cancel.load(Ordering::Relaxed) {
                 self.cancelled = true;
                 anyhow::bail!("login cancelled");
             }
-            self.send(event.clone());
             let left = end.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 return Ok(());
@@ -376,13 +384,17 @@ impl<F: FnMut(LoginEvent)> LoginProgressSink for LoginEvents<'_, F> {
         Ok(())
     }
     fn wait_for_browser_confirmation(&mut self, duration: Duration) -> anyhow::Result<()> {
-        self.wait(LoginEvent::WaitingForBrowser, duration)
+        self.wait(duration)
     }
     fn note_second_factor_wait(&mut self) -> anyhow::Result<()> {
+        if !self.second_factor_sent {
+            self.second_factor_sent = true;
+            (self.on_event)(LoginEvent::WaitingForSecondFactor);
+        }
         Ok(())
     }
     fn wait_for_second_factor(&mut self, duration: Duration) -> anyhow::Result<()> {
-        self.wait(LoginEvent::WaitingForSecondFactor, duration)
+        self.wait(duration)
     }
     fn finish(&mut self) -> anyhow::Result<()> {
         Ok(())
@@ -396,4 +408,83 @@ fn parse<R: DeserializeOwned>(data: Value) -> Result<R> {
             std::any::type_name::<R>()
         )
     })?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn login_events_deliver_the_prompt_and_second_factor_once() {
+        let cancel = AtomicBool::new(false);
+        let mut received = Vec::new();
+        let mut events = LoginEvents {
+            on_event: |event| received.push(event),
+            cancel: &cancel,
+            second_factor_sent: false,
+            cancelled: false,
+        };
+        let prompt = DeviceCodePrompt {
+            user_code: "ABCD".to_string(),
+            verification_uri: "https://verify".to_string(),
+            verification_uri_complete: Some("https://verify?code=ABCD".to_string()),
+            expires_in: 600,
+        };
+        let device: DeviceCodeResponse = serde_json::from_value(serde_json::json!({
+            "device_code": "private-polling-code",
+            "user_code": prompt.user_code,
+            "verification_uri": prompt.verification_uri,
+            "verification_uri_complete": prompt.verification_uri_complete,
+            "expires_in": prompt.expires_in,
+        }))
+        .expect("device-code response");
+        events.show_device_code(&device).expect("prompt");
+        events
+            .wait_for_browser_confirmation(Duration::ZERO)
+            .expect("wait");
+        events
+            .note_browser_confirmation_pending(1)
+            .expect("pending");
+        events
+            .note_browser_confirmation_slow_down(7)
+            .expect("slow down");
+        events
+            .wait_for_browser_confirmation(Duration::ZERO)
+            .expect("wait");
+        events.note_second_factor_wait().expect("second factor");
+        events.wait_for_second_factor(Duration::ZERO).expect("wait");
+        events
+            .note_second_factor_wait()
+            .expect("second factor again");
+        events.finish().expect("finish");
+
+        assert_eq!(
+            received,
+            [
+                LoginEvent::DeviceCode(prompt),
+                LoginEvent::WaitingForSecondFactor
+            ]
+        );
+    }
+
+    #[test]
+    fn login_can_be_cancelled_during_either_wait() {
+        for second_factor in [false, true] {
+            let cancel = AtomicBool::new(true);
+            let mut events = LoginEvents {
+                on_event: |_| {},
+                cancel: &cancel,
+                second_factor_sent: false,
+                cancelled: false,
+            };
+            let duration = Duration::from_secs(60);
+            let result = if second_factor {
+                events.wait_for_second_factor(duration)
+            } else {
+                events.wait_for_browser_confirmation(duration)
+            };
+            assert!(result.is_err());
+            assert!(events.cancelled);
+        }
+    }
 }

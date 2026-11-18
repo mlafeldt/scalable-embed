@@ -84,7 +84,6 @@ impl LoginView {
                 self.prompt = Some(prompt);
                 "Open the browser and confirm this code."
             }
-            LoginEvent::WaitingForBrowser => "Open the browser and confirm this code.",
             LoginEvent::WaitingForSecondFactor => "Approve the login on your linked device.",
         };
     }

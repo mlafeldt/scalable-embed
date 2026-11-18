@@ -11,9 +11,6 @@ pub struct Error {
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 impl Error {
-    /// The code of a login stopped by its `cancel` flag.
-    pub const LOGIN_CANCELLED: &str = "login_cancelled";
-
     pub(crate) fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
@@ -26,8 +23,8 @@ impl Error {
     }
 
     /// The code `sc --json` reports in `error.code`, such as `no_session`,
-    /// `rate_limited`, `network_error` or `invalid_input`, or
-    /// [`Error::LOGIN_CANCELLED`].
+    /// `rate_limited`, `network_error` or `invalid_input`. A login stopped
+    /// by its `cancel` flag has code `login_cancelled`.
     pub fn code(&self) -> &'static str {
         self.code
     }
@@ -59,5 +56,43 @@ impl From<anyhow::Error> for Error {
 impl From<clap::Error> for Error {
     fn from(err: clap::Error) -> Self {
         Self::invalid_input(err.to_string().trim_end())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::anyhow;
+
+    use super::*;
+
+    #[test]
+    fn classifies_errors_that_require_a_new_login() {
+        let cases = [
+            (anyhow!("No active session"), "no_session", true),
+            (
+                crate::auth::refresh_relogin_required("refresh token was rejected")
+                    .into_error()
+                    .context("query failed"),
+                "refresh_relogin_required",
+                true,
+            ),
+            (
+                anyhow!(crate::dpop::DPOP_SESSION_KEY_RELOGIN_MESSAGE),
+                "refresh_relogin_required",
+                true,
+            ),
+            (anyhow!("RATE_LIMITED: retry later"), "rate_limited", false),
+            (
+                anyhow!("Failed to call GraphQL endpoint"),
+                "network_error",
+                false,
+            ),
+        ];
+        for (source, code, needs_login) in cases {
+            let err = Error::from(source);
+            assert_eq!(err.code(), code, "{err}");
+            assert_eq!(err.needs_login(), needs_login, "{err}");
+        }
+        assert!(!Error::new("login_cancelled", "login cancelled").needs_login());
     }
 }

@@ -1,4 +1,4 @@
-//! Helpers for typing the results of your own queries.
+//! Timeframes and decimal deserialization for your own query results.
 
 use serde::{Deserialize, Deserializer};
 
