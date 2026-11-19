@@ -1,6 +1,6 @@
 //! Minimal terminal app: portfolio total, and its change and the holdings ranked
-//! by their return over a timeframe picked with Tab. Loads at startup and on
-//! `r`, in one query. Built with ratatui.
+//! by their return over a timeframe picked with Tab. Loads at startup, every
+//! 10 seconds and on `r`, in one query. Built with ratatui.
 //!
 //!   cargo run --example terminal
 //!   cargo run --example terminal -- --file-session
@@ -11,7 +11,8 @@
 //!
 //! API calls block, so a worker thread owns the `Client` (`worker.rs`). The
 //! main thread sends it requests and, while any are outstanding, checks for
-//! replies between short waits for keys.
+//! replies between short waits for keys. Otherwise it waits for a key until
+//! the next refresh is due.
 
 mod model;
 mod numbers;
@@ -23,7 +24,7 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
@@ -40,6 +41,10 @@ use worker::{Reply, Request};
 
 /// How long to wait for a key before checking for replies again.
 const TICK: Duration = Duration::from_millis(50);
+/// How long after a refresh the next one starts on its own.
+const REFRESH_EVERY: Duration = Duration::from_secs(10);
+/// The same, after the backend rejected a refresh with `rate_limited`.
+const RATE_LIMITED_WAIT: Duration = Duration::from_secs(5 * 60);
 const COLUMN_GAP: u16 = 3;
 const LOGIN_W: u16 = 46;
 const LOGIN_H: u16 = 9;
@@ -68,8 +73,14 @@ struct App {
     timeframe: usize,
     /// Requests the worker hasn't answered yet.
     pending: usize,
+    /// Whether a login or logout is among them. Logins and logouts wait for
+    /// it, but not for refreshes: the worker runs them in order.
+    auth_pending: bool,
     /// First visible holdings row.
     scroll: usize,
+    /// When the next refresh starts on its own, unless one is running or
+    /// nobody is logged in.
+    refresh_at: Instant,
     quit: bool,
 }
 
@@ -108,7 +119,9 @@ impl App {
             status: String::new(),
             timeframe: 0,
             pending: 0,
+            auth_pending: false,
             scroll: 0,
+            refresh_at: Instant::now() + REFRESH_EVERY,
             quit: false,
         }
     }
@@ -118,8 +131,16 @@ impl App {
         while !self.quit {
             terminal.draw(|frame| self.draw(frame))?;
             // Replies don't end the wait for a key, so it's short while any
-            // are outstanding.
-            if (!self.busy() || event::poll(TICK)?)
+            // are outstanding. Otherwise it ends when the next refresh is due,
+            // or lasts until a key if none is.
+            let now = Instant::now();
+            let timeout = if self.busy() {
+                Some(TICK)
+            } else {
+                self.next_refresh()
+                    .map(|at| at.saturating_duration_since(now))
+            };
+            if timeout.map_or(Ok(true), event::poll)?
                 && let Event::Key(key) = event::read()?
                 && key.is_press()
             {
@@ -128,6 +149,7 @@ impl App {
             while let Ok(reply) = self.replies.try_recv() {
                 self.handle(reply);
             }
+            self.refresh_if_due(Instant::now());
         }
         Ok(())
     }
@@ -136,12 +158,23 @@ impl App {
         self.pending > 0
     }
 
+    fn next_refresh(&self) -> Option<Instant> {
+        let on = !self.busy() && matches!(self.session, Session::LoggedIn(_));
+        on.then_some(self.refresh_at)
+    }
+
+    fn refresh_if_due(&mut self, now: Instant) {
+        if self.next_refresh().is_some_and(|at| at <= now) {
+            self.refresh();
+        }
+    }
+
     fn can_login(&self) -> bool {
-        !self.busy() && matches!(self.session, Session::LoggedOut)
+        !self.auth_pending && matches!(self.session, Session::LoggedOut)
     }
 
     fn can_logout(&self) -> bool {
-        !self.busy() && matches!(self.session, Session::LoggedIn(_))
+        !self.auth_pending && matches!(self.session, Session::LoggedIn(_))
     }
 
     // -----------------------------------------------------------------------
@@ -200,6 +233,9 @@ impl App {
         if reply.is_final() {
             self.pending = self.pending.saturating_sub(1);
         }
+        if matches!(reply, Reply::LoginDone(_) | Reply::LoggedOut(_)) {
+            self.auth_pending = false;
+        }
         match reply {
             Reply::Data(snapshot) => {
                 self.session = Session::LoggedIn(Some(snapshot));
@@ -207,8 +243,16 @@ impl App {
                     "Updated {}",
                     jiff::ZonedDateTime::now().strftime("%H:%M:%S")
                 );
+                self.refresh_at = Instant::now() + REFRESH_EVERY;
             }
-            Reply::Error(err) => self.status = format!("Error: {err}"),
+            Reply::RateLimited(err) => {
+                self.status = format!("Error: {err}");
+                self.refresh_at = Instant::now() + RATE_LIMITED_WAIT;
+            }
+            Reply::Error(err) => {
+                self.status = format!("Error: {err}");
+                self.refresh_at = Instant::now() + REFRESH_EVERY;
+            }
             Reply::NeedsLogin => self.start_login(),
             Reply::Login(event) => {
                 if let Session::LoggingIn(login) = &mut self.session {
@@ -236,7 +280,7 @@ impl App {
     }
 
     fn start_login(&mut self) {
-        if self.busy() || matches!(self.session, Session::LoggingIn(_)) {
+        if self.auth_pending || matches!(self.session, Session::LoggingIn(_)) {
             return;
         }
         let cancel = Arc::new(AtomicBool::new(false));
@@ -250,8 +294,10 @@ impl App {
     }
 
     fn send(&mut self, request: Request) {
+        let auth = matches!(request, Request::Login(_) | Request::Logout);
         if self.requests.send(request).is_ok() {
             self.pending += 1;
+            self.auth_pending |= auth;
         }
     }
 
@@ -336,7 +382,8 @@ impl App {
     /// The keys, with those that do nothing right now dimmed.
     fn key_hints(&self) -> Line<'_> {
         let hints = [
-            ("r", "Refresh", !self.busy()),
+            // Pressing it during a refresh does nothing, but that one ends soon.
+            ("r", "Refresh", true),
             ("l", "Log In", self.can_login()),
             ("o", "Log Out", self.can_logout()),
             ("Tab", "Timeframe", true),
@@ -583,7 +630,7 @@ mod tests {
     }
 
     #[test]
-    fn logout_waits_for_the_current_request() {
+    fn logout_during_a_refresh_follows_it() {
         let (requests, worker_requests) = mpsc::channel();
         let (_, replies) = mpsc::channel();
         let mut app = App::new(requests, replies);
@@ -591,11 +638,59 @@ mod tests {
         assert!(matches!(worker_requests.try_recv(), Ok(Request::Refresh)));
         let logout_key = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE);
         app.on_key(logout_key);
-        assert!(worker_requests.try_recv().is_err());
+        assert!(matches!(worker_requests.try_recv(), Ok(Request::Logout)));
+        app.on_key(logout_key);
+        assert!(worker_requests.try_recv().is_err(), "one logout is pending");
+
+        // The refresh finds the session gone before the logout's reply, which
+        // must not open the login dialog.
+        app.handle(Reply::NeedsLogin);
+        assert!(matches!(app.session, Session::LoggedIn(_)));
+        app.refresh_if_due(Instant::now() + RATE_LIMITED_WAIT);
+        app.handle(Reply::LoggedOut(Ok(())));
+        assert!(matches!(app.session, Session::LoggedOut));
+        assert!(
+            worker_requests.try_recv().is_err(),
+            "no refresh after logout"
+        );
+    }
+
+    #[test]
+    fn refreshes_a_while_after_the_last_refresh() {
+        let (requests, worker_requests) = mpsc::channel();
+        let (_, replies) = mpsc::channel();
+        let mut app = App::new(requests, replies);
+        let refreshed = || matches!(worker_requests.try_recv(), Ok(Request::Refresh));
+        app.refresh();
+        assert!(refreshed());
+        app.refresh_if_due(Instant::now() + RATE_LIMITED_WAIT);
+        assert!(!refreshed(), "one is running");
+
+        let empty = Snapshot {
+            total: None,
+            changes: [None; TIMEFRAMES.len()],
+            rows: Vec::new(),
+        };
+        for (reply, wait) in [
+            (Reply::Data(empty), REFRESH_EVERY),
+            (Reply::Error("try again".to_string()), REFRESH_EVERY),
+            (
+                Reply::RateLimited("slow down".to_string()),
+                RATE_LIMITED_WAIT,
+            ),
+        ] {
+            app.handle(reply);
+            let now = Instant::now();
+            app.refresh_if_due(now + wait - Duration::from_secs(1));
+            assert!(!refreshed(), "not due yet");
+            app.refresh_if_due(now + wait);
+            assert!(refreshed());
+        }
 
         app.handle(Reply::Error("try again".to_string()));
-        app.on_key(logout_key);
-        assert!(matches!(worker_requests.try_recv(), Ok(Request::Logout)));
+        app.session = Session::LoggedOut;
+        app.refresh_if_due(Instant::now() + RATE_LIMITED_WAIT);
+        assert!(!refreshed(), "logged out");
     }
 
     #[test]

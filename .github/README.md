@@ -64,8 +64,8 @@ let preview = client.run(buy)?;
 A complete program lives in `embed/examples/terminal/`: a minimal terminal app
 built with [ratatui](https://ratatui.rs). It shows the portfolio total, and its
 change and the holdings ranked by their return over a timeframe picked with Tab.
-It fetches all of it with one `query` at startup and on refresh, and logs in
-from a dialog:
+It fetches all of it with one `query` at startup, every 10 seconds and on
+refresh, and logs in from a dialog:
 
 ```bash
 cd embed

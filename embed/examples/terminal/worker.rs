@@ -20,6 +20,8 @@ pub enum Request {
 pub enum Reply {
     Data(Snapshot),
     NeedsLogin,
+    /// The backend refused the request as too many came before it.
+    RateLimited(String),
     Error(String),
     Login(LoginEvent),
     LoginDone(Result<(), String>),
@@ -46,6 +48,7 @@ fn run(mut client: Client, requests: Receiver<Request>, replies: Sender<Reply>) 
             Request::Refresh => match portfolio::fetch(&mut client) {
                 Ok(snapshot) => Reply::Data(snapshot),
                 Err(err) if err.needs_login() => Reply::NeedsLogin,
+                Err(err) if err.code() == "rate_limited" => Reply::RateLimited(err.to_string()),
                 Err(err) => Reply::Error(err.to_string()),
             },
             Request::Login(cancel) => Reply::LoginDone(
