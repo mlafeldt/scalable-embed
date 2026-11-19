@@ -493,7 +493,7 @@ fn lock_file_exclusive(_file: &fs::File) -> Result<()> {
 }
 
 fn keyring_entry(user: &str) -> Result<keyring_core::Entry> {
-    let service = crate::embed::keyring_service_override().unwrap_or(KEYRING_SERVICE);
+    let service = crate::embed::keyring_service(KEYRING_SERVICE);
     keyring_provider::entry(service, user).map_err(map_keyring_error)
 }
 

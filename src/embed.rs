@@ -67,16 +67,18 @@ pub(crate) fn config_dir_override() -> Option<&'static Path> {
     STORAGE.get().map(|storage| storage.config_dir.as_path())
 }
 
-pub(crate) fn keyring_service_override() -> Option<&'static str> {
+/// The embedder's keyring service, or upstream's `default` without one.
+pub(crate) fn keyring_service(default: &'static str) -> &'static str {
     STORAGE
         .get()
-        .map(|storage| storage.keyring_service.as_str())
+        .map_or(default, |storage| storage.keyring_service.as_str())
 }
 
-pub(crate) fn secure_enclave_label_override() -> Option<&'static str> {
+/// The embedder's Secure Enclave key label, or upstream's `default` without one.
+pub(crate) fn secure_enclave_label(default: &'static str) -> &'static str {
     STORAGE
         .get()
-        .map(|storage| storage.secure_enclave_label.as_str())
+        .map_or(default, |storage| storage.secure_enclave_label.as_str())
 }
 
 pub struct Options {
