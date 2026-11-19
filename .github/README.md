@@ -152,6 +152,10 @@ re-exports its `embed` module under the library's own name and holds what
 needs none of upstream's code: the query helpers and the example, which can add
 dependencies without touching the root `Cargo.lock`.
 
+Cargo finds `scalable-embed` in `embed/` by name when the repository is a git
+dependency, and its `scalable-cli = { path = ".." }` resolves within the same
+checkout, so both come from one commit.
+
 New code lives in `src/embed.rs`, `src/embed/`, `embed/` and `tests/embed.rs`.
 This README and its screenshots live in `.github/`, so GitHub shows it instead
 of upstream's `README.md`. Changes to upstream files are limited to these hooks:
