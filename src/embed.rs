@@ -27,10 +27,8 @@ use serde_json::Value;
 
 mod document;
 mod error;
-mod query_helpers;
 
 pub use error::{Error, Result};
-pub use query_helpers::{Timeframe, decimal};
 
 use crate::auth::{DeviceCodeResponse, LoginProgressSink};
 pub use crate::broker_context::BrokerContext;
@@ -293,7 +291,7 @@ impl Client {
     }
 
     /// Like `query`, but deserializes the `data` into your own type. For
-    /// decimals the API sends as strings, see [`decimal`].
+    /// decimals the API sends as strings, see `scalable_embed::decimal`.
     pub fn query_as<R: DeserializeOwned>(
         &mut self,
         operation_name: &str,

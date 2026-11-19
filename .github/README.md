@@ -148,8 +148,9 @@ app signed with keychain entitlements should work, but this is untested.
 The repository is upstream's code plus a few additions. The root package keeps
 upstream's name, `scalable-cli`, so merging upstream releases doesn't conflict
 in `Cargo.toml` or `Cargo.lock`. The `scalable-embed` crate in `embed/`
-re-exports its `embed` module under the library's own name and holds the
-example, which can add dependencies without touching the root `Cargo.lock`.
+re-exports its `embed` module under the library's own name and holds what
+needs none of upstream's code: the query helpers and the example, which can add
+dependencies without touching the root `Cargo.lock`.
 
 New code lives in `src/embed.rs`, `src/embed/`, `embed/` and `tests/embed.rs`.
 This README and its screenshots live in `.github/`, so GitHub shows it instead
