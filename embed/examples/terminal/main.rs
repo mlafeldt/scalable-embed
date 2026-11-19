@@ -36,7 +36,7 @@ use ratatui::{DefaultTerminal, Frame};
 use scalable_embed::{Client, DeviceCodePrompt, LoginEvent, Options, SessionBackendPreference};
 
 use model::{Snapshot, TIMEFRAMES};
-use numbers::{eur, number, signed_eur, signed_pct};
+use numbers::{eur, plain, signed_eur, signed_pct};
 use worker::{Reply, Request};
 
 /// How long to wait for a key before checking for replies again.
@@ -52,8 +52,8 @@ const LOGIN_H: u16 = 9;
 fn main() -> anyhow::Result<()> {
     let file_session = std::env::args().any(|arg| arg == "--file-session");
     // With files and a keychain entry of its own, apart from the `sc` CLI's.
-    let home = std::env::var_os("HOME").context("HOME is not set")?;
-    let config_dir = std::path::Path::new(&home).join(".config/scalable-embed-example");
+    let home = std::env::home_dir().context("no home directory")?;
+    let config_dir = home.join(".config/scalable-embed-example");
     let mut options = Options::new(config_dir, "dev.example.scalable-embed");
     if file_session {
         options.config.auth.session_backend = SessionBackendPreference::File;
@@ -419,7 +419,7 @@ fn holdings_table(
             [
                 eur(row.value),
                 signed_pct(row.returns[timeframe].map(|r| r * 100.0)),
-                row.price.map_or("–".to_string(), |p| number(p, 2)),
+                plain(row.price),
             ]
         })
         .collect();
@@ -550,19 +550,28 @@ mod tests {
         }
     }
 
-    #[test]
-    fn cancelled_login_finishes_before_another_can_start() {
+    /// An app and the requests it sends. It never gets a reply by itself.
+    fn app() -> (App, Receiver<Request>) {
         let (requests, worker_requests) = mpsc::channel();
         let (_, replies) = mpsc::channel();
-        let mut app = App::new(requests, replies);
+        (App::new(requests, replies), worker_requests)
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn cancelled_login_finishes_before_another_can_start() {
+        let (mut app, worker_requests) = app();
         app.session = Session::LoggedOut;
-        let login_key = KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE);
+        let login_key = key(KeyCode::Char('l'));
 
         app.on_key(login_key);
         let Request::Login(cancel) = worker_requests.try_recv().expect("login request") else {
             panic!("login request");
         };
-        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        app.on_key(key(KeyCode::Esc));
         assert!(cancel.load(Ordering::Relaxed));
         assert!(app.busy());
 
@@ -599,11 +608,9 @@ mod tests {
 
     #[test]
     fn login_dialog_keeps_only_quit_from_the_main_keys() {
-        let (requests, _worker_requests) = mpsc::channel();
-        let (_, replies) = mpsc::channel();
-        let mut app = App::new(requests, replies);
+        let (mut app, _worker_requests) = app();
         app.session = Session::LoggedOut;
-        app.on_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+        app.on_key(key(KeyCode::Char('l')));
         assert!(matches!(app.session, Session::LoggingIn(_)));
 
         let hints: String = app
@@ -613,20 +620,18 @@ mod tests {
             .map(|span| span.content.as_ref())
             .collect();
         assert_eq!(hints.trim_end(), "q Quit");
-        app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        app.on_key(key(KeyCode::Char('q')));
         assert!(app.quit);
     }
 
     #[test]
     fn completed_login_is_shown_even_if_escape_closes_the_dialog() {
         for escape_first in [true, false] {
-            let (requests, worker_requests) = mpsc::channel();
-            let (_, replies) = mpsc::channel();
-            let mut app = App::new(requests, replies);
+            let (mut app, worker_requests) = app();
             app.session = Session::LoggedOut;
-            app.on_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+            app.on_key(key(KeyCode::Char('l')));
             assert!(matches!(worker_requests.try_recv(), Ok(Request::Login(_))));
-            let escape = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+            let escape = key(KeyCode::Esc);
 
             if escape_first {
                 app.on_key(escape);
@@ -644,12 +649,10 @@ mod tests {
 
     #[test]
     fn logout_during_a_refresh_follows_it() {
-        let (requests, worker_requests) = mpsc::channel();
-        let (_, replies) = mpsc::channel();
-        let mut app = App::new(requests, replies);
+        let (mut app, worker_requests) = app();
         app.refresh();
         assert!(matches!(worker_requests.try_recv(), Ok(Request::Refresh)));
-        let logout_key = KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE);
+        let logout_key = key(KeyCode::Char('l'));
         app.on_key(logout_key);
         assert!(matches!(worker_requests.try_recv(), Ok(Request::Logout)));
         app.on_key(logout_key);
@@ -670,9 +673,7 @@ mod tests {
 
     #[test]
     fn refreshes_a_while_after_the_last_refresh() {
-        let (requests, worker_requests) = mpsc::channel();
-        let (_, replies) = mpsc::channel();
-        let mut app = App::new(requests, replies);
+        let (mut app, worker_requests) = app();
         let refreshed = || matches!(worker_requests.try_recv(), Ok(Request::Refresh));
         app.refresh();
         assert!(refreshed());
@@ -708,9 +709,7 @@ mod tests {
 
     #[test]
     fn draws_the_holdings_ranked_by_return() {
-        let (requests, _) = mpsc::channel();
-        let (_, replies) = mpsc::channel();
-        let mut app = App::new(requests, replies);
+        let (mut app, _) = app();
         let mut changes = [None; TIMEFRAMES.len()];
         changes[0] = Some(1366.69);
         app.session = Session::LoggedIn(Some(Snapshot {

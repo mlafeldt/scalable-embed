@@ -4,11 +4,12 @@ use scalable_embed::{Client, Timeframe, decimal};
 use serde::Deserialize;
 use serde_json::json;
 
-use super::model::{Row, Snapshot, TIMEFRAMES};
+use super::model::{PerTimeframe, Row, Snapshot, TIMEFRAMES, TimeframeChoice};
 
 /// Everything the screen shows, in one request: upstream's overview and
 /// holdings queries trimmed to the fields used here, plus each security's
 /// performances, which upstream only fetches per security in `broker quote`.
+/// Both per-timeframe lists alias their number to `value`, to share a type.
 const SNAPSHOT_QUERY: &str = r#"
 query ExampleSnapshot($accountId: ID!, $portfolioId: ID!) {
   account(id: $accountId) {
@@ -17,7 +18,7 @@ query ExampleSnapshot($accountId: ID!, $portfolioId: ID!) {
         valuation
         timeWeightedReturnByTimeframe {
           timeframe
-          simpleAbsoluteReturn
+          value: simpleAbsoluteReturn
         }
       }
       inventory {
@@ -31,7 +32,7 @@ query ExampleSnapshot($accountId: ID!, $portfolioId: ID!) {
             midPrice
             performancesByTimeframe {
               timeframe
-              performance
+              value: performance
             }
           }
         }
@@ -42,7 +43,6 @@ query ExampleSnapshot($accountId: ID!, $portfolioId: ID!) {
 "#;
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct Data {
     account: Account,
 }
@@ -64,16 +64,14 @@ struct Portfolio {
 struct Valuation {
     #[serde(default, deserialize_with = "decimal")]
     valuation: Option<f64>,
-    #[serde(default)]
-    time_weighted_return_by_timeframe: Option<Vec<Change>>,
+    time_weighted_return_by_timeframe: Option<Vec<TimedValue>>,
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Change {
+struct TimedValue {
     timeframe: Timeframe,
     #[serde(default, deserialize_with = "decimal")]
-    simple_absolute_return: Option<f64>,
+    value: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -101,15 +99,7 @@ struct ItemValuation {
 struct QuoteTick {
     #[serde(default, deserialize_with = "decimal")]
     mid_price: Option<f64>,
-    #[serde(default)]
-    performances_by_timeframe: Option<Vec<Performance>>,
-}
-
-#[derive(Deserialize)]
-struct Performance {
-    timeframe: Timeframe,
-    #[serde(default, deserialize_with = "decimal")]
-    performance: Option<f64>,
+    performances_by_timeframe: Option<Vec<TimedValue>>,
 }
 
 pub fn fetch(client: &mut Client) -> scalable_embed::Result<Snapshot> {
@@ -129,12 +119,6 @@ impl From<Data> for Snapshot {
         let returns = valuation
             .time_weighted_return_by_timeframe
             .unwrap_or_default();
-        let changes = TIMEFRAMES.map(|choice| {
-            returns
-                .iter()
-                .find(|r| r.timeframe == choice.portfolio)
-                .and_then(|r| r.simple_absolute_return)
-        });
         let rows = inventory
             .items
             .into_iter()
@@ -148,21 +132,26 @@ impl From<Data> for Snapshot {
                     name: item.name.unwrap_or(item.isin),
                     value: item.portfolio_isin_performance.and_then(|p| p.valuation),
                     price: quote.as_ref().and_then(|q| q.mid_price),
-                    returns: TIMEFRAMES.map(|choice| {
-                        performances
-                            .iter()
-                            .find(|p| p.timeframe == choice.holdings)
-                            .and_then(|p| p.performance)
-                    }),
+                    returns: per_timeframe(performances, |choice| choice.holdings),
                 }
             })
             .collect();
         Snapshot {
             total: valuation.valuation,
-            changes,
+            changes: per_timeframe(&returns, |choice| choice.portfolio),
             rows,
         }
     }
+}
+
+/// The value for each of `TIMEFRAMES`, by the API timeframe `pick` gives it.
+fn per_timeframe(values: &[TimedValue], pick: fn(TimeframeChoice) -> Timeframe) -> PerTimeframe {
+    TIMEFRAMES.map(pick).map(|timeframe| {
+        values
+            .iter()
+            .find(|v| v.timeframe == timeframe)
+            .and_then(|v| v.value)
+    })
 }
 
 #[cfg(test)]
@@ -175,8 +164,8 @@ mod tests {
             "valuation": {
                 "valuation": "1234.56",
                 "timeWeightedReturnByTimeframe": [
-                    {"timeframe": "INTRADAY", "simpleAbsoluteReturn": 12.5},
-                    {"timeframe": "MAX", "simpleAbsoluteReturn": "300"}
+                    {"timeframe": "INTRADAY", "value": 12.5},
+                    {"timeframe": "MAX", "value": "300"}
                 ]
             },
             "inventory": {"items": [
@@ -185,8 +174,8 @@ mod tests {
                     "name": "iShares Core MSCI World",
                     "portfolioIsinPerformance": {"valuation": 1000.0},
                     "quoteTick": {"midPrice": "98.76", "performancesByTimeframe": [
-                        {"timeframe": "SINCE_BUY", "performance": 0.25},
-                        {"timeframe": "TEN_YEARS", "performance": 1.5}
+                        {"timeframe": "SINCE_BUY", "value": 0.25},
+                        {"timeframe": "TEN_YEARS", "value": 1.5}
                     ]}
                 },
                 {"isin": "DE0001", "name": null, "portfolioIsinPerformance": null, "quoteTick": null}
