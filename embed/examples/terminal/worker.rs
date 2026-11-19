@@ -28,13 +28,6 @@ pub enum Reply {
     LoggedOut(Result<(), String>),
 }
 
-impl Reply {
-    /// Whether this reply ends a request, as opposed to reporting progress.
-    pub fn is_final(&self) -> bool {
-        !matches!(self, Reply::Login(_))
-    }
-}
-
 pub fn spawn(client: Client) -> (Sender<Request>, Receiver<Reply>) {
     let (requests, worker_requests) = mpsc::channel();
     let (worker_replies, replies) = mpsc::channel();

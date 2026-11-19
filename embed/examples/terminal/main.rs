@@ -71,10 +71,10 @@ struct App {
     status: String,
     /// Index into `TIMEFRAMES`: whose returns the screen shows and sorts by.
     timeframe: usize,
-    /// Requests the worker hasn't answered yet.
-    pending: usize,
-    /// Whether a login or logout is among them. Logins and logouts wait for
-    /// it, but not for refreshes: the worker runs them in order.
+    /// Whether the worker hasn't answered a refresh yet.
+    refreshing: bool,
+    /// The same for a login or logout. Logins and logouts wait for it, but
+    /// not for refreshes: the worker runs them in order.
     auth_pending: bool,
     /// First visible holdings row.
     scroll: usize,
@@ -118,7 +118,7 @@ impl App {
             session: Session::LoggedIn(None),
             status: String::new(),
             timeframe: 0,
-            pending: 0,
+            refreshing: false,
             auth_pending: false,
             scroll: 0,
             refresh_at: Instant::now() + REFRESH_EVERY,
@@ -155,7 +155,7 @@ impl App {
     }
 
     fn busy(&self) -> bool {
-        self.pending > 0
+        self.refreshing || self.auth_pending
     }
 
     fn next_refresh(&self) -> Option<Instant> {
@@ -233,11 +233,12 @@ impl App {
     }
 
     fn handle(&mut self, reply: Reply) {
-        if reply.is_final() {
-            self.pending = self.pending.saturating_sub(1);
-        }
-        if matches!(reply, Reply::LoginDone(_) | Reply::LoggedOut(_)) {
-            self.auth_pending = false;
+        match reply {
+            Reply::Data(_) | Reply::NeedsLogin | Reply::RateLimited(_) | Reply::Error(_) => {
+                self.refreshing = false;
+            }
+            Reply::LoginDone(_) | Reply::LoggedOut(_) => self.auth_pending = false,
+            Reply::Login(_) => {}
         }
         match reply {
             Reply::Data(snapshot) => {
@@ -297,10 +298,12 @@ impl App {
     }
 
     fn send(&mut self, request: Request) {
-        let auth = matches!(request, Request::Login(_) | Request::Logout);
+        let flag = match request {
+            Request::Refresh => &mut self.refreshing,
+            Request::Login(_) | Request::Logout => &mut self.auth_pending,
+        };
         if self.requests.send(request).is_ok() {
-            self.pending += 1;
-            self.auth_pending |= auth;
+            *flag = true;
         }
     }
 
