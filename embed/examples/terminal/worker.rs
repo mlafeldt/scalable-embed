@@ -36,23 +36,31 @@ pub fn spawn(client: Client) -> (Sender<Request>, Receiver<Reply>) {
 }
 
 fn run(mut client: Client, requests: Receiver<Request>, replies: Sender<Reply>) {
+    // The account and portfolio to fetch, until a login or logout.
+    let mut ids = None;
     for request in requests {
         let reply = match request {
-            Request::Refresh => match portfolio::fetch(&mut client) {
+            Request::Refresh => match portfolio::fetch(&mut client, &mut ids) {
                 Ok(snapshot) => Reply::Data(snapshot),
                 Err(err) if err.needs_login() => Reply::NeedsLogin,
                 Err(err) if err.code() == "rate_limited" => Reply::RateLimited(err.to_string()),
                 Err(err) => Reply::Error(err.to_string()),
             },
-            Request::Login(cancel) => Reply::LoginDone(
-                client
-                    .login(&cancel, |event| {
-                        let _ = replies.send(Reply::Login(event));
-                    })
-                    .map(drop)
-                    .map_err(|err| err.to_string()),
-            ),
-            Request::Logout => Reply::LoggedOut(client.logout().map_err(|e| e.to_string())),
+            Request::Login(cancel) => {
+                ids = None;
+                Reply::LoginDone(
+                    client
+                        .login(&cancel, |event| {
+                            let _ = replies.send(Reply::Login(event));
+                        })
+                        .map(drop)
+                        .map_err(|err| err.to_string()),
+                )
+            }
+            Request::Logout => {
+                ids = None;
+                Reply::LoggedOut(client.logout().map_err(|e| e.to_string()))
+            }
         };
         if replies.send(reply).is_err() {
             return;

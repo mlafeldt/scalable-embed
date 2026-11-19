@@ -1,6 +1,6 @@
 //! Fetches the portfolio in one query and maps it to the screen model.
 
-use scalable_embed::{Client, Timeframe, decimal};
+use scalable_embed::{BrokerIds, Client, Timeframe, decimal};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -102,8 +102,14 @@ struct QuoteTick {
     performances_by_timeframe: Option<Vec<TimedValue>>,
 }
 
-pub fn fetch(client: &mut Client) -> scalable_embed::Result<Snapshot> {
-    let ids = client.broker_ids(None)?;
+/// `ids` keeps the account and portfolio between calls, as looking them up
+/// reads the session again and can take a request. Clear it when the session
+/// changes.
+pub fn fetch(client: &mut Client, ids: &mut Option<BrokerIds>) -> scalable_embed::Result<Snapshot> {
+    let ids = match ids {
+        Some(ids) => ids,
+        None => ids.insert(client.broker_ids(None)?),
+    };
     let variables = json!({"accountId": ids.account_id, "portfolioId": ids.portfolio_id});
     let data: Data = client.query_as("ExampleSnapshot", SNAPSHOT_QUERY, variables)?;
     Ok(Snapshot::from(data))
