@@ -15,9 +15,12 @@ two ways to use them:
   the CLI's behavior, including the two-step trade and savings-plan
   confirmation flows.
 
+The terminal example is a small app built on the library. It shows a portfolio
+and its holdings, and logs in from a dialog, here with made-up data:
+
 ![The terminal example showing a portfolio's total, today's change and its holdings ranked by today's return](screenshots/terminal.png)
 
-*The [terminal example](#usage) with made-up data.*
+![The terminal example's login dialog showing a device code to confirm in the browser](screenshots/terminal-login.png)
 
 ## Usage
 
@@ -149,7 +152,7 @@ re-exports its `embed` module under the library's own name and holds the
 example, which can add dependencies without touching the root `Cargo.lock`.
 
 New code lives in `src/embed.rs`, `src/embed/`, `embed/` and `tests/embed.rs`.
-This README and its screenshot live in `.github/`, so GitHub shows it instead
+This README and its screenshots live in `.github/`, so GitHub shows it instead
 of upstream's `README.md`. Changes to upstream files are limited to these hooks:
 
 | File | Change |

@@ -169,12 +169,13 @@ impl App {
         }
     }
 
-    fn can_login(&self) -> bool {
-        !self.auth_pending && matches!(self.session, Session::LoggedOut)
-    }
-
-    fn can_logout(&self) -> bool {
-        !self.auth_pending && matches!(self.session, Session::LoggedIn(_))
+    fn login_label(&self) -> Option<&'static str> {
+        match self.session {
+            _ if self.auth_pending => None,
+            Session::LoggedOut => Some("Log In"),
+            Session::LoggedIn(_) => Some("Log Out"),
+            Session::LoggingIn(_) => None,
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -198,6 +199,7 @@ impl App {
                     self.session = Session::LoggedOut;
                     self.status = "Not logged in".to_string();
                 }
+                KeyCode::Char('q') => self.quit = true,
                 _ => {}
             }
             return;
@@ -205,11 +207,12 @@ impl App {
         match key.code {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('r') => self.refresh(),
-            KeyCode::Char('l') if self.can_login() => {
-                self.start_login();
-            }
-            KeyCode::Char('o') if self.can_logout() => {
-                self.send(Request::Logout);
+            KeyCode::Char('l') if self.login_label().is_some() => {
+                if matches!(self.session, Session::LoggedOut) {
+                    self.start_login();
+                } else {
+                    self.send(Request::Logout);
+                }
             }
             KeyCode::Tab => self.timeframe = (self.timeframe + 1) % TIMEFRAMES.len(),
             KeyCode::BackTab => {
@@ -379,25 +382,19 @@ impl App {
         );
     }
 
-    /// The keys, with those that do nothing right now dimmed.
     fn key_hints(&self) -> Line<'_> {
+        // The login dialog shows its own keys.
+        let dialog = matches!(self.session, Session::LoggingIn(_));
         let hints = [
-            // Pressing it during a refresh does nothing, but that one ends soon.
-            ("r", "Refresh", true),
-            ("l", "Log In", self.can_login()),
-            ("o", "Log Out", self.can_logout()),
-            ("Tab", "Timeframe", true),
-            ("q", "Quit", true),
+            (!dialog).then_some(("r", "Refresh")),
+            self.login_label().map(|label| ("l", label)),
+            (!dialog).then_some(("Tab", "Timeframe")),
+            Some(("q", "Quit")),
         ];
         let mut spans = Vec::new();
-        for (key, label, enabled) in hints {
-            let style = if enabled {
-                Style::new()
-            } else {
-                Style::new().dim()
-            };
-            spans.push(Span::styled(key, style.bold()));
-            spans.push(Span::styled(format!(" {label}   "), style));
+        for (key, label) in hints.into_iter().flatten() {
+            spans.push(key.bold());
+            spans.push(format!(" {label}   ").into());
         }
         Line::from(spans)
     }
@@ -569,16 +566,9 @@ mod tests {
         app.on_key(login_key);
         assert!(worker_requests.try_recv().is_err(), "login is still busy");
         let hints = app.key_hints();
-        let login_hint = hints
-            .spans
-            .iter()
-            .find(|span| span.content == "l")
-            .expect("login hint");
         assert!(
-            login_hint
-                .style
-                .add_modifier
-                .contains(ratatui::style::Modifier::DIM)
+            hints.spans.iter().all(|span| span.content != "l"),
+            "no login hint"
         );
 
         // Replies sent before the worker saw the cancellation are ignored.
@@ -602,6 +592,26 @@ mod tests {
         app.handle(Reply::LoginDone(Ok(())));
         assert!(matches!(app.session, Session::LoggedIn(None)));
         assert!(matches!(worker_requests.try_recv(), Ok(Request::Refresh)));
+    }
+
+    #[test]
+    fn login_dialog_keeps_only_quit_from_the_main_keys() {
+        let (requests, _worker_requests) = mpsc::channel();
+        let (_, replies) = mpsc::channel();
+        let mut app = App::new(requests, replies);
+        app.session = Session::LoggedOut;
+        app.on_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+        assert!(matches!(app.session, Session::LoggingIn(_)));
+
+        let hints: String = app
+            .key_hints()
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(hints.trim_end(), "q Quit");
+        app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(app.quit);
     }
 
     #[test]
@@ -636,7 +646,7 @@ mod tests {
         let mut app = App::new(requests, replies);
         app.refresh();
         assert!(matches!(worker_requests.try_recv(), Ok(Request::Refresh)));
-        let logout_key = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE);
+        let logout_key = KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE);
         app.on_key(logout_key);
         assert!(matches!(worker_requests.try_recv(), Ok(Request::Logout)));
         app.on_key(logout_key);
@@ -726,7 +736,7 @@ mod tests {
             " │ SAP ·····································   12.607,50 €   -1,18 %   252,15 │",
             " │ iShares Core MSCI World ·················   52.418,60 €         –   108,74 │",
             " └────────────────────────────────────────────────────────────────────────────┘",
-            " r Refresh   l Log In   o Log Out   Tab Timeframe   q Quit     Updated 12:08:36",
+            " r Refresh   l Log Out   Tab Timeframe   q Quit                Updated 12:08:36",
         ];
         let lines: Vec<&str> = screen
             .lines()
