@@ -47,8 +47,8 @@ if !client.is_logged_in()? {
 // Read: a query of your own.
 let ids = client.broker_ids(None)?;
 let data = client.query(
-    "Total",
-    "query Total($accountId: ID!, $portfolioId: ID!) {
+    "BrokerValuation",
+    "query BrokerValuation($accountId: ID!, $portfolioId: ID!) {
        account(id: $accountId) {
          brokerPortfolio(id: $portfolioId) {
            valuation(includeYearToDate: false) { valuation }

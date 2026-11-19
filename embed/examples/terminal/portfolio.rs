@@ -4,14 +4,14 @@ use scalable_embed::{BrokerIds, Client, Timeframe, decimal};
 use serde::Deserialize;
 use serde_json::json;
 
-use super::model::{PerTimeframe, Row, Snapshot, TIMEFRAMES, TimeframeChoice};
+use super::model::{Holding, PerTimeframe, Portfolio, TIMEFRAMES, TimeframeChoice};
 
 /// Everything the screen shows, in one request: upstream's overview and
 /// holdings queries trimmed to the fields used here, plus each security's
 /// performances, which upstream only fetches per security in `broker quote`.
 /// Both per-timeframe lists alias their number to `value`, to share a type.
-const SNAPSHOT_QUERY: &str = r#"
-query ExampleSnapshot($accountId: ID!, $portfolioId: ID!) {
+const PORTFOLIO_QUERY: &str = r#"
+query BrokerPortfolio($accountId: ID!, $portfolioId: ID!) {
   account(id: $accountId) {
     brokerPortfolio(id: $portfolioId) {
       valuation(includeYearToDate: true) {
@@ -50,11 +50,11 @@ struct Data {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Account {
-    broker_portfolio: Portfolio,
+    broker_portfolio: BrokerPortfolio,
 }
 
 #[derive(Deserialize)]
-struct Portfolio {
+struct BrokerPortfolio {
     valuation: Valuation,
     inventory: Inventory,
 }
@@ -84,12 +84,12 @@ struct Inventory {
 struct Item {
     isin: String,
     name: Option<String>,
-    portfolio_isin_performance: Option<ItemValuation>,
+    portfolio_isin_performance: Option<PortfolioIsinPerformance>,
     quote_tick: Option<QuoteTick>,
 }
 
 #[derive(Deserialize)]
-struct ItemValuation {
+struct PortfolioIsinPerformance {
     #[serde(default, deserialize_with = "decimal")]
     valuation: Option<f64>,
 }
@@ -105,19 +105,22 @@ struct QuoteTick {
 /// `ids` keeps the account and portfolio between calls, as looking them up
 /// reads the session again and can take a request. Clear it when the session
 /// changes.
-pub fn fetch(client: &mut Client, ids: &mut Option<BrokerIds>) -> scalable_embed::Result<Snapshot> {
+pub fn fetch(
+    client: &mut Client,
+    ids: &mut Option<BrokerIds>,
+) -> scalable_embed::Result<Portfolio> {
     let ids = match ids {
         Some(ids) => ids,
         None => ids.insert(client.broker_ids(None)?),
     };
     let variables = json!({"accountId": ids.account_id, "portfolioId": ids.portfolio_id});
-    let data: Data = client.query_as("ExampleSnapshot", SNAPSHOT_QUERY, variables)?;
-    Ok(Snapshot::from(data))
+    let data: Data = client.query_as("BrokerPortfolio", PORTFOLIO_QUERY, variables)?;
+    Ok(Portfolio::from(data))
 }
 
-impl From<Data> for Snapshot {
+impl From<Data> for Portfolio {
     fn from(data: Data) -> Self {
-        let Portfolio {
+        let BrokerPortfolio {
             valuation,
             inventory,
         } = data.account.broker_portfolio;
@@ -125,7 +128,7 @@ impl From<Data> for Snapshot {
         let returns = valuation
             .time_weighted_return_by_timeframe
             .unwrap_or_default();
-        let rows = inventory
+        let holdings = inventory
             .items
             .into_iter()
             .map(|item| {
@@ -134,7 +137,7 @@ impl From<Data> for Snapshot {
                     .as_ref()
                     .and_then(|q| q.performances_by_timeframe.as_deref())
                     .unwrap_or_default();
-                Row {
+                Holding {
                     name: item.name.unwrap_or(item.isin),
                     value: item.portfolio_isin_performance.and_then(|p| p.valuation),
                     price: quote.as_ref().and_then(|q| q.mid_price),
@@ -142,10 +145,10 @@ impl From<Data> for Snapshot {
                 }
             })
             .collect();
-        Snapshot {
-            total: valuation.valuation,
+        Portfolio {
+            valuation: valuation.valuation,
             changes: per_timeframe(&returns, |choice| choice.portfolio),
-            rows,
+            holdings,
         }
     }
 }
@@ -165,7 +168,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reads_the_snapshot_query_response() {
+    fn reads_the_portfolio_query_response() {
         let data: Data = serde_json::from_value(json!({"account": {"brokerPortfolio": {
             "valuation": {
                 "valuation": "1234.56",
@@ -189,14 +192,14 @@ mod tests {
         }}}))
         .expect("response");
 
-        let snapshot = Snapshot::from(data);
+        let portfolio = Portfolio::from(data);
 
         let since_buy = TIMEFRAMES.len() - 1;
-        assert_eq!(snapshot.total, Some(1234.56));
-        assert_eq!(snapshot.changes[0], Some(12.5));
-        assert_eq!(snapshot.changes[since_buy], Some(300.0));
-        let [held, bare] = &snapshot.rows[..] else {
-            panic!("two rows");
+        assert_eq!(portfolio.valuation, Some(1234.56));
+        assert_eq!(portfolio.changes[0], Some(12.5));
+        assert_eq!(portfolio.changes[since_buy], Some(300.0));
+        let [held, bare] = &portfolio.holdings[..] else {
+            panic!("two holdings");
         };
         assert_eq!(held.price, Some(98.76));
         assert_eq!(held.returns[since_buy], Some(0.25));

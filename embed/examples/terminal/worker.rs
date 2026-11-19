@@ -7,7 +7,7 @@ use std::thread;
 
 use scalable_embed::{Client, LoginEvent};
 
-use super::model::Snapshot;
+use super::model::Portfolio;
 use super::portfolio;
 
 pub enum Request {
@@ -18,7 +18,7 @@ pub enum Request {
 }
 
 pub enum Reply {
-    Data(Snapshot),
+    Data(Portfolio),
     NeedsLogin,
     /// The backend refused the request as too many came before it.
     RateLimited(String),
@@ -41,7 +41,7 @@ fn run(mut client: Client, requests: Receiver<Request>, replies: Sender<Reply>) 
     for request in requests {
         let reply = match request {
             Request::Refresh => match portfolio::fetch(&mut client, &mut ids) {
-                Ok(snapshot) => Reply::Data(snapshot),
+                Ok(portfolio) => Reply::Data(portfolio),
                 Err(err) if err.needs_login() => Reply::NeedsLogin,
                 Err(err) if err.code() == "rate_limited" => Reply::RateLimited(err.to_string()),
                 Err(err) => Reply::Error(err.to_string()),

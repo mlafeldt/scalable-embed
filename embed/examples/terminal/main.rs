@@ -35,7 +35,7 @@ use ratatui::widgets::{Block, Cell, Clear, Padding, Paragraph, Row, Table, Tabs}
 use ratatui::{DefaultTerminal, Frame};
 use scalable_embed::{Client, DeviceCodePrompt, LoginEvent, Options, SessionBackendPreference};
 
-use model::{Snapshot, TIMEFRAMES};
+use model::{Portfolio, TIMEFRAMES};
 use numbers::{eur, plain, signed_eur, signed_pct};
 use worker::{Reply, Request};
 
@@ -46,8 +46,8 @@ const REFRESH_EVERY: Duration = Duration::from_secs(10);
 /// The same, after the backend rejected a refresh with `rate_limited`.
 const RATE_LIMITED_WAIT: Duration = Duration::from_secs(5 * 60);
 const COLUMN_GAP: u16 = 3;
-const LOGIN_W: u16 = 46;
-const LOGIN_H: u16 = 9;
+const LOGIN_WIDTH: u16 = 46;
+const LOGIN_HEIGHT: u16 = 9;
 
 fn main() -> anyhow::Result<()> {
     let file_session = std::env::args().any(|arg| arg == "--file-session");
@@ -89,7 +89,7 @@ enum Session {
     /// The login dialog is open.
     LoggingIn(LoginView),
     /// Logged in, or assumed to be at startup, with data once it arrives.
-    LoggedIn(Option<Snapshot>),
+    LoggedIn(Option<Portfolio>),
 }
 
 struct LoginView {
@@ -241,8 +241,8 @@ impl App {
             Reply::Login(_) => {}
         }
         match reply {
-            Reply::Data(snapshot) => {
-                self.session = Session::LoggedIn(Some(snapshot));
+            Reply::Data(portfolio) => {
+                self.session = Session::LoggedIn(Some(portfolio));
                 self.status = format!(
                     "Updated {}",
                     jiff::ZonedDateTime::now().strftime("%H:%M:%S")
@@ -330,13 +330,13 @@ impl App {
             .divider(" │ ");
         frame.render_widget(tabs, timeframes);
 
-        let snapshot = match &self.session {
-            Session::LoggedIn(snapshot) => snapshot.as_ref(),
+        let portfolio = match &self.session {
+            Session::LoggedIn(portfolio) => portfolio.as_ref(),
             _ => None,
         };
-        let amount = snapshot.and_then(|s| s.total);
+        let amount = portfolio.and_then(|p| p.valuation);
         frame.render_widget(Line::from(eur(amount)).bold(), total);
-        let amount = snapshot.and_then(|s| s.changes[self.timeframe]);
+        let amount = portfolio.and_then(|p| p.changes[self.timeframe]);
         let line = Line::from(vec![
             Span::styled(signed_eur(amount), gain_style(amount)),
             Span::raw("  "),
@@ -368,8 +368,8 @@ impl App {
         let inner = block.inner(area);
         frame.render_widget(block, area);
         let placeholder = match &self.session {
-            Session::LoggedIn(Some(snapshot)) if !snapshot.rows.is_empty() => {
-                let table = holdings_table(snapshot, self.timeframe, inner, &mut self.scroll);
+            Session::LoggedIn(Some(portfolio)) if !portfolio.holdings.is_empty() => {
+                let table = holdings_table(portfolio, self.timeframe, inner, &mut self.scroll);
                 frame.render_widget(table, inner);
                 return;
             }
@@ -403,23 +403,23 @@ impl App {
     }
 }
 
-/// The rows by their return over `TIMEFRAMES[timeframe]` that fit `area`, from
-/// row `scroll` on, which it keeps within the list.
+/// The holdings by their return over `TIMEFRAMES[timeframe]` that fit `area`,
+/// from row `scroll` on, which it keeps within the list.
 fn holdings_table(
-    snapshot: &Snapshot,
+    portfolio: &Portfolio,
     timeframe: usize,
     area: Rect,
     scroll: &mut usize,
 ) -> Table<'static> {
     const HEADERS: [&str; 3] = ["Position", "Return", "Price"];
-    let rows = snapshot.ranked(timeframe);
-    let cells: Vec<[String; 3]> = rows
+    let holdings = portfolio.ranked(timeframe);
+    let cells: Vec<[String; 3]> = holdings
         .iter()
-        .map(|row| {
+        .map(|holding| {
             [
-                eur(row.value),
-                signed_pct(row.returns[timeframe].map(|r| r * 100.0)),
-                plain(row.price),
+                eur(holding.value),
+                signed_pct(holding.returns[timeframe].map(|r| r * 100.0)),
+                plain(holding.price),
             ]
         })
         .collect();
@@ -433,7 +433,7 @@ fn holdings_table(
     let name_width = area.width.saturating_sub(numbers) as usize;
 
     let visible = area.height.saturating_sub(1).max(1) as usize;
-    *scroll = (*scroll).min(rows.len().saturating_sub(visible));
+    *scroll = (*scroll).min(holdings.len().saturating_sub(visible));
 
     let right = |text: String| Cell::from(Line::from(text).right_aligned());
     let header = Row::new(
@@ -441,19 +441,16 @@ fn holdings_table(
             .chain(HEADERS.map(|header| right(header.to_string()))),
     )
     .bold();
-    let body =
-        rows.iter()
-            .zip(cells)
-            .skip(*scroll)
-            .take(visible)
-            .map(|(row, [value, ret, price])| {
-                Row::new([
-                    Cell::from(leader(&row.name, name_width)),
-                    right(value),
-                    right(ret).style(gain_style(row.returns[timeframe])),
-                    right(price),
-                ])
-            });
+    let body = holdings.iter().zip(cells).skip(*scroll).take(visible).map(
+        |(holding, [value, ret, price])| {
+            Row::new([
+                Cell::from(leader(&holding.name, name_width)),
+                right(value),
+                right(ret).style(gain_style(holding.returns[timeframe])),
+                right(price),
+            ])
+        },
+    );
     let [value, ret, price] = widths.map(Constraint::Length);
     Table::new(body, [Constraint::Fill(1), value, ret, price])
         .header(header)
@@ -463,9 +460,10 @@ fn holdings_table(
 /// The login dialog: the device code, the login's progress, and the keys to
 /// open the browser or cancel.
 fn draw_login(frame: &mut Frame, login: &LoginView) {
-    let area = frame
-        .area()
-        .centered(Constraint::Length(LOGIN_W), Constraint::Length(LOGIN_H));
+    let area = frame.area().centered(
+        Constraint::Length(LOGIN_WIDTH),
+        Constraint::Length(LOGIN_HEIGHT),
+    );
     let block = Block::bordered()
         .title("Log In to Scalable")
         .padding(Padding::uniform(1));
@@ -539,10 +537,10 @@ mod tests {
 
     use super::*;
 
-    fn row(name: &str, value: f64, price: f64, today: Option<f64>) -> model::Row {
+    fn holding(name: &str, value: f64, price: f64, today: Option<f64>) -> model::Holding {
         let mut returns = [None; TIMEFRAMES.len()];
         returns[0] = today;
-        model::Row {
+        model::Holding {
             name: name.to_string(),
             value: Some(value),
             price: Some(price),
@@ -680,10 +678,10 @@ mod tests {
         app.refresh_if_due(Instant::now() + RATE_LIMITED_WAIT);
         assert!(!refreshed(), "one is running");
 
-        let empty = Snapshot {
-            total: None,
+        let empty = Portfolio {
+            valuation: None,
             changes: [None; TIMEFRAMES.len()],
-            rows: Vec::new(),
+            holdings: Vec::new(),
         };
         for (reply, wait) in [
             (Reply::Data(empty), REFRESH_EVERY),
@@ -712,13 +710,13 @@ mod tests {
         let (mut app, _) = app();
         let mut changes = [None; TIMEFRAMES.len()];
         changes[0] = Some(1366.69);
-        app.session = Session::LoggedIn(Some(Snapshot {
-            total: Some(185638.95),
+        app.session = Session::LoggedIn(Some(Portfolio {
+            valuation: Some(185638.95),
             changes,
-            rows: vec![
-                row("SAP", 12607.5, 252.15, Some(-0.0118)),
-                row("iShares Core MSCI World", 52418.6, 108.74, None),
-                row("NVIDIA", 23912.4, 158.22, Some(0.0284)),
+            holdings: vec![
+                holding("SAP", 12607.5, 252.15, Some(-0.0118)),
+                holding("iShares Core MSCI World", 52418.6, 108.74, None),
+                holding("NVIDIA", 23912.4, 158.22, Some(0.0284)),
             ],
         }));
         app.status = "Updated 12:08:36".to_string();

@@ -1,4 +1,4 @@
-//! The portfolio values, rows and timeframes the UI shows.
+//! The portfolio values, holdings and timeframes the UI shows.
 
 use scalable_embed::Timeframe;
 
@@ -36,14 +36,14 @@ pub const TIMEFRAMES: [TimeframeChoice; 6] = {
 /// One value per entry in `TIMEFRAMES`.
 pub type PerTimeframe = [Option<f64>; TIMEFRAMES.len()];
 
-pub struct Snapshot {
-    pub total: Option<f64>,
+pub struct Portfolio {
+    pub valuation: Option<f64>,
     /// The portfolio's change in €.
     pub changes: PerTimeframe,
-    pub rows: Vec<Row>,
+    pub holdings: Vec<Holding>,
 }
 
-pub struct Row {
+pub struct Holding {
     pub name: String,
     pub value: Option<f64>,
     pub price: Option<f64>,
@@ -51,15 +51,15 @@ pub struct Row {
     pub returns: PerTimeframe,
 }
 
-impl Snapshot {
-    /// The rows by their return over `TIMEFRAMES[timeframe]`, best first.
+impl Portfolio {
+    /// The holdings by their return over `TIMEFRAMES[timeframe]`, best first.
     /// Missing returns go last.
-    pub fn ranked(&self, timeframe: usize) -> Vec<&Row> {
-        let mut rows: Vec<&Row> = self.rows.iter().collect();
-        rows.sort_by(|a, b| match (a.returns[timeframe], b.returns[timeframe]) {
+    pub fn ranked(&self, timeframe: usize) -> Vec<&Holding> {
+        let mut holdings: Vec<&Holding> = self.holdings.iter().collect();
+        holdings.sort_by(|a, b| match (a.returns[timeframe], b.returns[timeframe]) {
             (Some(a), Some(b)) => b.total_cmp(&a),
             (a, b) => b.is_some().cmp(&a.is_some()),
         });
-        rows
+        holdings
     }
 }
