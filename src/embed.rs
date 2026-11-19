@@ -208,6 +208,10 @@ impl Client {
     {
         let argv = std::iter::once(OsString::from("sc")).chain(args.into_iter().map(Into::into));
         let crate::cli::Cli { command } = crate::cli::Cli::try_parse_from(argv)?;
+        // Upstream's `login` prints its prompt to the terminal.
+        if matches!(command, crate::cli::Commands::Login(_)) {
+            return Err(Error::invalid_input("run: use Client::login to log in"));
+        }
         let command = crate::normalize_command(command)?;
         Ok(crate::run_machine_command(
             command,

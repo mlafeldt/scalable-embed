@@ -20,6 +20,9 @@ fn embed_client_uses_its_config_dir_and_pins_storage_locations() {
     let err = client.run(["broker", "bogus"]).expect_err("bad subcommand");
     assert_eq!(err.code(), "invalid_input", "{err}");
 
+    let err = client.run(["login"]).expect_err("login has its own method");
+    assert_eq!(err.code(), "invalid_input", "{err}");
+
     let err = client
         .query("Buy", "mutation Buy { buy }", Value::Null)
         .expect_err("mutation");
