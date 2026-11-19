@@ -104,7 +104,7 @@ impl Options {
                     signing_key_backend: DpopKeyBackend::File,
                     ..RuntimeAuthConfig::default()
                 },
-                trade_controls: None,
+                ..AppConfig::default()
             },
         }
     }
@@ -154,12 +154,7 @@ impl Client {
         let env = crate::channel::current_env();
         let env_cfg = crate::channel::current_env_config();
         let dpop_options = crate::channel::current_dpop_runtime_options(&self.config);
-        let mut events = LoginEvents {
-            on_event,
-            cancel,
-            second_factor_sent: false,
-            cancelled: false,
-        };
+        let mut events = LoginEvents::new(cancel, on_event);
         let result = crate::auth::login_with_device_code_with_hooks(
             &mut self.session_manager,
             env,
@@ -378,8 +373,17 @@ struct LoginEvents<'a, F> {
     cancelled: bool,
 }
 
-impl<F: FnMut(LoginEvent)> LoginEvents<'_, F> {
+impl<'a, F: FnMut(LoginEvent)> LoginEvents<'a, F> {
     const STEP: Duration = Duration::from_millis(100);
+
+    fn new(cancel: &'a AtomicBool, on_event: F) -> Self {
+        Self {
+            on_event,
+            cancel,
+            second_factor_sent: false,
+            cancelled: false,
+        }
+    }
 
     fn show_device_code(&mut self, device: &DeviceCodeResponse) -> anyhow::Result<()> {
         (self.on_event)(LoginEvent::DeviceCode(DeviceCodePrompt {
@@ -464,12 +468,7 @@ mod tests {
     fn login_events_deliver_the_prompt_and_second_factor_once() {
         let cancel = AtomicBool::new(false);
         let mut received = Vec::new();
-        let mut events = LoginEvents {
-            on_event: |event| received.push(event),
-            cancel: &cancel,
-            second_factor_sent: false,
-            cancelled: false,
-        };
+        let mut events = LoginEvents::new(&cancel, |event| received.push(event));
         let prompt = DeviceCodePrompt {
             user_code: "ABCD".to_string(),
             verification_uri: "https://verify".to_string(),
@@ -517,12 +516,7 @@ mod tests {
     fn login_can_be_cancelled_during_either_wait() {
         for second_factor in [false, true] {
             let cancel = AtomicBool::new(true);
-            let mut events = LoginEvents {
-                on_event: |_| {},
-                cancel: &cancel,
-                second_factor_sent: false,
-                cancelled: false,
-            };
+            let mut events = LoginEvents::new(&cancel, |_| {});
             let duration = Duration::from_secs(60);
             let result = if second_factor {
                 events.wait_for_second_factor(duration)
