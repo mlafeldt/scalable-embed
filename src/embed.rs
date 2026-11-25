@@ -28,6 +28,7 @@ use serde_json::Value;
 mod document;
 mod error;
 
+pub(crate) use error::rate_limited;
 pub use error::{Error, Result};
 
 use crate::auth::{DeviceCodeResponse, LoginProgressSink};

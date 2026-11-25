@@ -114,7 +114,8 @@ reading and not for trading.
 
 Errors carry the code `sc --json` reports, such as `no_session`, `rate_limited`
 or `network_error`, so apps can match on `err.code()`; `err.needs_login()` tells
-when only a new login helps.
+when only a new login helps, and `err.retry_after()` how long a rate limit asked
+to wait.
 
 - Use an app-specific `config_dir` and `keyring_service` so the app and the
   `sc` CLI never overwrite each other's session or signing key. The service
@@ -168,6 +169,7 @@ of upstream's `README.md`. Changes to upstream files are limited to these hooks:
 | `src/config.rs` | config dir honors the embedder's override |
 | `src/session.rs` | keyring service honors the embedder's override |
 | `src/dpop/secure_enclave.rs` | two label overrides; namespace construction lives in `embed` |
+| `src/graphql.rs` | a 429 raises `embed`'s typed rate-limit error, with upstream's message and the `Retry-After` seconds |
 
 `AGENTS.md` holds the rule that keeps it that way.
 

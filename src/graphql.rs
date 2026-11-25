@@ -246,10 +246,10 @@ fn execute_graphql_with_headers_with_retry_policy<T: Serialize, R: DeserializeOw
             let status = response.status();
             let retry_nonce = dpop_nonce_from_headers(response.headers());
             if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                bail!(
-                    "{}",
-                    graphql_rate_limited_message(operation_name, response.headers())
-                );
+                bail!(crate::embed::rate_limited(
+                    graphql_rate_limited_message(operation_name, response.headers()),
+                    retry_after_delta_seconds(response.headers()),
+                ));
             }
             let text = response.text().unwrap_or_default();
             if retry_dpop_nonce
