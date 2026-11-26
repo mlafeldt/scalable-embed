@@ -117,6 +117,14 @@ or `network_error`, so apps can match on `err.code()`; `err.needs_login()` tells
 when only a new login helps, and `err.retry_after()` how long a rate limit asked
 to wait.
 
+Upstream assigns most codes by its commands' error messages, so a `query` or
+`query_as` of your own fails with few of them besides the session's:
+`invalid_input` for a mutation or for variables that aren't an object,
+`network_error`, `rate_limited`, `backend_http_error` for any other HTTP error,
+a 400 included, and `internal_error` for a GraphQL error or `data` that doesn't
+fit your type. A query that fails every time looks like an outage, so cap how
+often an app retries on these.
+
 - Use an app-specific `config_dir` and `keyring_service` so the app and the
   `sc` CLI never overwrite each other's session or signing key. The service
   also namespaces the Secure Enclave key when that backend is selected.

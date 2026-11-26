@@ -27,3 +27,11 @@ widened visibility.
   `Cargo.lock` with every release, so an added one conflicts on each merge.
 - The hooks table in `.github/README.md` (section "Layout") lists every hook.
   Update it with each hook you add, change or remove.
+
+## Checks
+
+Run `cargo fmt` and `cargo test --locked` at the root, and again in `embed/`, a
+workspace of its own; drop `--locked` there when you add a dependency.
+Upstream's code is rustfmt-clean, so formatting changes only fork lines. After
+a merge brings an upstream file that isn't, revert what `cargo fmt` changed in
+it.
