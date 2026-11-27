@@ -289,10 +289,10 @@ fn decode_graphql_data<R: DeserializeOwned>(
     operation_name: Option<&str>,
 ) -> Result<R> {
     if let Some(errors) = response.errors {
-        bail!(
-            "{}",
-            graphql_application_error_message(operation_name, &errors)
-        );
+        bail!(crate::embed::graphql_errors(
+            graphql_application_error_message(operation_name, &errors),
+            errors,
+        ));
     }
     let data = response.data.context("GraphQL response missing data")?;
     serde_json::from_str(data.get()).context("Failed to parse GraphQL JSON response data")

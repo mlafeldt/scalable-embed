@@ -28,8 +28,8 @@ use serde_json::Value;
 mod document;
 mod error;
 
-pub(crate) use error::rate_limited;
-pub use error::{Error, Result};
+pub use error::{Error, GraphqlError, Result};
+pub(crate) use error::{graphql_errors, rate_limited};
 
 use crate::auth::{DeviceCodeResponse, LoginProgressSink};
 pub use crate::broker_context::BrokerContext;

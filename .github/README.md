@@ -139,7 +139,9 @@ reading and not for trading.
 Errors carry the code `sc --json` reports, such as `no_session`, `rate_limited`
 or `network_error`, so apps can match on `err.code()`; `err.needs_login()` tells
 when only a new login helps, and `err.retry_after()` how long a rate limit asked
-to wait.
+to wait. When the backend answered with GraphQL errors, `err.graphql_errors()`
+gives each one's `message()`, `code()` (`extensions.code`) and
+`validation_error_code()` (`validationErrors.errorCode`), and `json()` the rest.
 
 Upstream assigns most codes by its commands' error messages, so a `query` or
 `query_as` of your own fails with few of them besides the session's:
@@ -201,7 +203,7 @@ of upstream's `README.md`. Changes to upstream files are limited to these hooks:
 | `src/config.rs` | config dir honors the embedder's override |
 | `src/session.rs` | keyring service honors the embedder's override |
 | `src/dpop/secure_enclave.rs` | two label overrides; namespace construction lives in `embed` |
-| `src/graphql.rs` | a 429 raises `embed`'s typed rate-limit error, with upstream's message and the `Retry-After` seconds |
+| `src/graphql.rs` | a 429 raises `embed`'s typed rate-limit error, with upstream's message and the `Retry-After` seconds; a response's `errors` raise `embed`'s typed GraphQL errors, with upstream's message and the errors |
 
 `AGENTS.md` holds the rule that keeps it that way.
 
