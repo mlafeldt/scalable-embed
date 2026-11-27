@@ -29,7 +29,7 @@ mod document;
 mod error;
 
 pub use error::{Error, GraphqlError, Result};
-pub(crate) use error::{graphql_errors, rate_limited};
+pub(crate) use error::{graphql_errors, http_error, rate_limited};
 
 use crate::auth::{DeviceCodeResponse, LoginProgressSink};
 pub use crate::broker_context::BrokerContext;

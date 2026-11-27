@@ -10,6 +10,7 @@ pub struct Error {
     code: &'static str,
     message: String,
     retry_after: Option<Duration>,
+    http_status: Option<u16>,
     graphql_errors: Vec<GraphqlError>,
 }
 
@@ -21,6 +22,7 @@ impl Error {
             code,
             message: message.into(),
             retry_after: None,
+            http_status: None,
             graphql_errors: Vec::new(),
         }
     }
@@ -46,6 +48,13 @@ impl Error {
     /// rate-limited the request with a `Retry-After` in seconds.
     pub fn retry_after(&self) -> Option<Duration> {
         self.retry_after
+    }
+
+    /// The HTTP status the API's GraphQL endpoint refused a request with, such
+    /// as 400, 429 for a rate limit, or 503. None for any other error, such as
+    /// a network error or GraphQL errors, which come with a 200.
+    pub fn http_status(&self) -> Option<u16> {
+        self.http_status
     }
 
     /// The errors the backend answered with in a GraphQL response's `errors`,
@@ -103,12 +112,17 @@ impl From<anyhow::Error> for Error {
         let retry_after = (err.chain())
             .find_map(|cause| cause.downcast_ref::<RateLimited>())
             .and_then(|limited| limited.retry_after);
+        let http_status = err.chain().find_map(|cause| {
+            (cause.downcast_ref::<HttpError>().map(|http| http.status))
+                .or_else(|| cause.downcast_ref::<RateLimited>().map(|_| 429))
+        });
         let graphql_errors = (err.chain())
             .find_map(|cause| cause.downcast_ref::<GraphqlErrors>())
             .map(|errors| errors.errors.clone())
             .unwrap_or_default();
         Self {
             retry_after,
+            http_status,
             graphql_errors,
             ..Self::new(
                 crate::machine::classify_error(&err).code,
@@ -143,6 +157,29 @@ impl fmt::Display for RateLimited {
 }
 
 impl std::error::Error for RateLimited {}
+
+/// An HTTP error other than a 429, which `graphql.rs` raises with the status
+/// beside its message, so `Error::http_status` needn't read it back out of the
+/// text. Its message is upstream's, which upstream classifies by.
+#[derive(Debug)]
+pub(crate) struct HttpError {
+    message: String,
+    status: u16,
+}
+
+/// The hook `graphql.rs` raises an HTTP error other than a 429 with:
+/// upstream's `message`, and the response's `status`.
+pub(crate) fn http_error(message: String, status: u16) -> HttpError {
+    HttpError { message, status }
+}
+
+impl fmt::Display for HttpError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for HttpError {}
 
 /// A GraphQL response's errors, which `graphql.rs` raises beside its message,
 /// so `Error::graphql_errors` needn't read them back out of the text. Its
@@ -205,6 +242,28 @@ mod tests {
         // A wait in another error's text is none.
         let err = Error::from(anyhow::anyhow!("GraphQL HTTP error 400: retry after 30s"));
         assert_eq!(err.retry_after(), None);
+    }
+
+    #[test]
+    fn carries_the_status_of_an_http_error() {
+        let message = "GraphQL HTTP error 400 during TransactionDetails";
+        let err = anyhow::Error::new(http_error(message.to_string(), 400));
+        let err = Error::from(err.context("query failed"));
+        // Classified and worded as upstream's message alone was.
+        let plain = Error::from(anyhow::anyhow!(message).context("query failed"));
+        assert_eq!(err.code(), "backend_http_error");
+        assert_eq!(
+            (err.code(), err.to_string()),
+            (plain.code(), plain.to_string())
+        );
+        assert_eq!(err.http_status(), Some(400));
+        // A status in another error's text is none.
+        assert_eq!(plain.http_status(), None);
+
+        let limited = anyhow::Error::new(rate_limited("RATE_LIMITED".to_string(), None));
+        assert_eq!(Error::from(limited).http_status(), Some(429));
+        let refused = graphql_errors(String::new(), serde_json::json!([]));
+        assert_eq!(Error::from(anyhow::Error::new(refused)).http_status(), None);
     }
 
     #[test]

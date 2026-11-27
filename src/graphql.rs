@@ -271,7 +271,7 @@ fn execute_graphql_with_headers_with_retry_policy<T: Serialize, R: DeserializeOw
                 message.push_str(". ");
                 message.push_str(hint);
             }
-            bail!("{message}");
+            bail!(crate::embed::http_error(message, status.as_u16()));
         }
 
         let parsed = response
