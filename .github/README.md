@@ -15,6 +15,8 @@ two ways to use them:
   the CLI's behavior, including the two-step trade and savings-plan
   confirmation flows.
 
+An app can also offer the whole CLI as a subcommand of its own (`run_cli`).
+
 The terminal example is a small app built on the library. It shows a portfolio
 and its holdings, and logs in from a dialog, here with made-up data:
 
@@ -90,6 +92,28 @@ without a failing test.
 `run` runs any `sc` command except `login` and returns its raw JSON;
 `run_as::<T>` deserializes it into your own serde type. Commands can read too,
 but each is a request of its own, and upstream may change their JSON.
+
+`run_cli` runs an `sc` command as the CLI does, with its terminal output,
+prompts and exit codes, but with the app's storage and config. An app can offer
+the whole CLI as a subcommand of its own this way, e.g. `myapp sc login`:
+
+```rust
+#[derive(clap::Subcommand)]
+enum Command {
+    /// Scalable CLI commands, with myapp's session
+    #[command(disable_help_flag = true)]
+    Sc {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<std::ffi::OsString>,
+    },
+}
+
+// Never returns: it exits with sc's exit code.
+Command::Sc { args } => scalable_embed::run_cli(options, "myapp sc", args),
+```
+
+Usage and help then read `myapp sc`, but upstream's help examples and hints
+still say `sc`, and `--version` prints `sc`'s.
 
 ### Why reads and changes take different paths
 
@@ -172,7 +196,7 @@ of upstream's `README.md`. Changes to upstream files are limited to these hooks:
 | File | Change |
 | --- | --- |
 | `Cargo.toml` | `channel-prod` is a default feature (the public repo has no `build.rs` for the dev channel) |
-| `src/lib.rs` | declares `pub mod embed` |
+| `src/lib.rs` | declares `pub mod embed`; `run()` delegates to `run_with()`, which takes the arguments and config for `run_cli`; the update notice after login skips embedded runs |
 | `src/auth.rs` | device-code login split with a prompt callback; response fields and progress sink crate-visible for the embedding adapter |
 | `src/config.rs` | config dir honors the embedder's override |
 | `src/session.rs` | keyring service honors the embedder's override |

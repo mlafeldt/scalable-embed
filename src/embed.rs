@@ -80,6 +80,54 @@ pub(crate) fn secure_enclave_label(default: &'static str) -> &'static str {
         .map_or(default, |storage| storage.secure_enclave_label.as_str())
 }
 
+fn set_storage(config_dir: PathBuf, keyring_service: String) -> Result<()> {
+    let storage = Storage::new(config_dir, keyring_service);
+    if let Err(storage) = STORAGE.set(storage)
+        && STORAGE.get() != Some(&storage)
+    {
+        return Err(Error::invalid_input(
+            "embed storage is process-wide and already set to a different \
+             config_dir or keyring_service",
+        ));
+    }
+    Ok(())
+}
+
+/// Whether an app set storage in this process. `sc`'s update notice after
+/// login points at upstream's releases, so it doesn't apply.
+pub(crate) fn embedded() -> bool {
+    STORAGE.get().is_some()
+}
+
+/// Runs an `sc` command as the CLI does, with its terminal output, prompts,
+/// `--json` envelope and exit codes, but with the app's storage and config, so
+/// an app can offer the whole CLI as a subcommand, e.g. `myapp sc login`.
+/// `bin_name` stands in for `sc` in usage and help, e.g. `"myapp sc"`, and
+/// `args` are the arguments after it, e.g. `["login"]`.
+///
+/// Never returns: it exits the process with `sc`'s exit code. Storage is
+/// process-wide: once `Client::new` or this sets it, the other must pass the
+/// same `config_dir` and `keyring_service`.
+pub fn run_cli<I, T>(options: Options, bin_name: &str, args: I) -> !
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString>,
+{
+    let argv = std::iter::once(OsString::from(bin_name))
+        .chain(args.into_iter().map(Into::into))
+        .collect();
+    let result = set_storage(options.config_dir, options.keyring_service)
+        .map_err(anyhow::Error::from)
+        .and_then(|()| crate::run_with(argv, || Ok(options.config)));
+    match result {
+        Ok(()) => std::process::exit(0),
+        Err(err) => {
+            eprintln!("Error: {}", crate::human_error_message(&err));
+            std::process::exit(1);
+        }
+    }
+}
+
 pub struct Options {
     /// Holds the session (file backend), signing key, broker context and
     /// confirmation stores. Use an app-specific directory so the app and the
@@ -121,15 +169,7 @@ impl Client {
     /// it fails, and later calls must pass the same `config_dir` and
     /// `keyring_service`.
     pub fn new(options: Options) -> Result<Self> {
-        let storage = Storage::new(options.config_dir, options.keyring_service);
-        if let Err(storage) = STORAGE.set(storage)
-            && STORAGE.get() != Some(&storage)
-        {
-            return Err(Error::invalid_input(
-                "embed::Client storage is process-wide and already set to a different \
-                 config_dir or keyring_service",
-            ));
-        }
+        set_storage(options.config_dir, options.keyring_service)?;
         let session_manager = SessionManager::new(&options.config)?;
         Ok(Self {
             config: options.config,

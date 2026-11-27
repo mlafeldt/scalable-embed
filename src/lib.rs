@@ -97,7 +97,13 @@ use crate::trade_presentation::{
 use crate::transport_security::validate_env_transport_security;
 
 pub fn run() -> Result<()> {
-    let raw_args: Vec<_> = std::env::args_os().collect();
+    run_with(std::env::args_os().collect(), AppConfig::load_or_default)
+}
+
+pub(crate) fn run_with(
+    raw_args: Vec<std::ffi::OsString>,
+    load_config: impl FnOnce() -> Result<AppConfig>,
+) -> Result<()> {
     let Cli { command } = match Cli::try_parse_from(raw_args.clone()) {
         Ok(cli) => cli,
         Err(err) => {
@@ -124,7 +130,7 @@ pub fn run() -> Result<()> {
     };
     let execution_context = ExecutionContext::from_command(&command);
 
-    let config = AppConfig::load_or_default()?;
+    let config = load_config()?;
     let mut session_manager = SessionManager::new(&config)?;
 
     if execution_context.requests_machine_output() {
@@ -708,6 +714,9 @@ where
 
 #[cfg(feature = "channel-prod")]
 fn update_notice_after_login() -> Option<String> {
+    if crate::embed::embedded() {
+        return None;
+    }
     crate::update_check::check_for_update_after_login()
         .map(|update| format_update_notice(&update.available_tag(), &update.installed_version()))
 }
